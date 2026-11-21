@@ -111,8 +111,19 @@ fn write_manifest(dir: &Path, manifest: &SessionManifest) -> Result<(), SessionE
 
     fs::rename(&tmp_path, dir.join("session.json"))?;
 
-    let parent = fs::File::open(dir)?;
-    parent.sync_all()?;
+    // The rename has already committed `session.json`. Directory fsync is
+    // durability hardening only, so it must never turn a successful write into
+    // a reported failure. A plain File::open on a directory fails on Windows
+    // (it needs FILE_FLAG_BACKUP_SEMANTICS), so keep this step Unix-only and
+    // best-effort; Windows CI still exercises create_session via the existing
+    // round-trip test.
+    #[cfg(unix)]
+    {
+        if let Ok(parent) = fs::File::open(dir) {
+            let _ = parent.sync_all();
+        }
+    }
+
     Ok(())
 }
 
