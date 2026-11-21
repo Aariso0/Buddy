@@ -429,6 +429,7 @@ Documents hold ciphertext plus the minimal plaintext fields listed in section 12
 - **Fault injection:** kill the process mid-recording, unplug the device, fill the disk, drop the network during sync.
 - **Security:** sync-off network test, E2EE round-trip across Rust and TypeScript, server authorization tests.
 - **CI:** GitHub Actions matrix (Linux, Windows, macOS) for build, lint, unit and contract tests. Real capture on each OS requires physical machines (open question S9).
+- **Release trigger (decided 2026-11-22):** tests run on pull requests targeting `main` and on pushes to `main`. A push to `main` publishes a release only when `apps/desktop/package.json` is newer than the latest `v*` tag; the release is tagged `v<version>`. An unchanged version tests without publishing. Development continues on `application`.
 - A test is never reported as passing unless it was run.
 
 ---
@@ -537,7 +538,7 @@ Do these early, before committing to the dependent design.
 
 These were not explicitly decided in the interview; change any that are wrong.
 
-1. Minimum OS targets: Windows 10 or later, macOS 13 or later, mainstream Linux with PipeWire. **(verify against S1-S3)**
+1. Minimum OS targets (decided 2026-11-22): Windows 10 or later with backend limitations accepted, macOS 14.2 or later, Linux with PipeWire only. Previously assumed macOS 13+; superseded because system-audio capture is expected to need 14.2+. **(verify capture APIs against S1-S3)**
 2. UI language is English at first, with i18n scaffolding in place from M5.
 3. Global hotkeys: start/stop and add-bookmark, user-configurable.
 4. Audio is written as lossless chunks during recording and compressed on finalize.
