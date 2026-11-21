@@ -3,3 +3,20 @@ name = "buddy-desktop"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+autobins = false
+
+[lib]
+name = "buddy_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "buddy"
+path = "src/main.rs"
+
+[dependencies]
+buddy-core = { path = "../../../crates/buddy-core" }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2" }
+
+[build-dependencies]
+tauri-build = { version = "2" }

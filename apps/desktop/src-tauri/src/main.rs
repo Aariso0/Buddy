@@ -1,1 +1,3 @@
-fn main() {}
+fn main() {
+    buddy_desktop::run()
+}
