@@ -1,0 +1,234 @@
+name: CI
+
+# Development happens on `application`. This workflow only runs for PRs into `main`
+# and pushes to `main`; merging `application` into `main` is what produces a release.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      should_release: ${{ steps.version.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch tags
+        run: git fetch --tags --force
+      - name: Decide whether the package version warrants a release
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "JSON.parse(require('node:fs').readFileSync('apps/desktop/package.json', 'utf8')).version")"
+          LATEST_TAG="$(git tag --list 'v*' --sort=-v:refname | head -n 1 || true)"
+          LATEST_VERSION="${LATEST_TAG#v}"
+
+          if [ -z "$LATEST_TAG" ]; then
+            SHOULD_RELEASE=true
+          elif [ "$VERSION" != "$LATEST_VERSION" ] && [ "$(printf '%s\n%s\n' "$LATEST_VERSION" "$VERSION" | sort -V | tail -n 1)" = "$VERSION" ]; then
+            SHOULD_RELEASE=true
+          else
+            SHOULD_RELEASE=false
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "should_release=$SHOULD_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"
+          echo "should_release=$SHOULD_RELEASE"
+          echo "latest_tag=${LATEST_TAG:-none}"
+
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: pnpm install --frozen-lockfile
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace
+      - run: pnpm --filter @buddy/desktop build
+
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: pnpm install --frozen-lockfile
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace
+      - run: pnpm --filter @buddy/desktop build
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: pnpm install --frozen-lockfile
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace
+      - run: pnpm --filter @buddy/desktop build
+
+  package-linux:
+    needs: [test-linux, test-windows, test-macos, prepare]
+    if: github.event_name == 'push' && needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install Linux packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf rpm
+      - run: pnpm install --frozen-lockfile
+      - name: Match Tauri config version to the release tag
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node -e "const fs = require('node:fs'); const p = 'apps/desktop/src-tauri/tauri.conf.json'; const c = JSON.parse(fs.readFileSync(p, 'utf8')); c.version = process.env.RELEASE_VERSION; fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');"
+      - name: Build Linux bundles
+        run: |
+          pnpm --filter @buddy/desktop exec tauri build --bundles appimage,deb,rpm
+          tar czf buddy-linux-x86_64.tar.gz -C target/release buddy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifact-linux
+          path: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
+            buddy-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  package-windows:
+    needs: [test-linux, test-windows, test-macos, prepare]
+    if: github.event_name == 'push' && needs.prepare.outputs.should_release == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: pnpm install --frozen-lockfile
+      - name: Match Tauri config version to the release tag
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node -e "const fs = require('node:fs'); const p = 'apps/desktop/src-tauri/tauri.conf.json'; const c = JSON.parse(fs.readFileSync(p, 'utf8')); c.version = process.env.RELEASE_VERSION; fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');"
+      - name: Build Windows bundles
+        run: pnpm --filter @buddy/desktop exec tauri build --bundles nsis
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifact-windows
+          path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  package-macos:
+    needs: [test-linux, test-windows, test-macos, prepare]
+    if: github.event_name == 'push' && needs.prepare.outputs.should_release == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: pnpm install --frozen-lockfile
+      - name: Match Tauri config version to the release tag
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node -e "const fs = require('node:fs'); const p = 'apps/desktop/src-tauri/tauri.conf.json'; const c = JSON.parse(fs.readFileSync(p, 'utf8')); c.version = process.env.RELEASE_VERSION; fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');"
+      - name: Build macOS bundles
+        run: pnpm --filter @buddy/desktop exec tauri build --bundles dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifact-macos
+          path: target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  # M1 adds real-capture soak jobs (Arch Linux and Windows). When they land they must
+  # be dependencies of `publish` so a failed soak on either OS blocks publishing.
+  publish:
+    needs: [prepare, package-linux, package-windows, package-macos]
+    if: github.event_name == 'push' && needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Create unsigned GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: v${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find dist -type f)
+          printf 'Uploading %d artifact file(s)\n' "${#files[@]}"
+          gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file .github/release-notes-template.md "${files[@]}"
