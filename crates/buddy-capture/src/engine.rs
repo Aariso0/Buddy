@@ -22,6 +22,96 @@ const STOPPING: u8 = 2;
 const STOP_DRAIN_LIMIT: Duration = Duration::from_millis(250);
 const WRITER_IDLE_SLEEP: Duration = Duration::from_millis(1);
 const MAX_DRAIN_SAMPLES: usize = 16_384;
+// Power of two, preallocated once per track. One reader produces and the
+// writer consumes, so each queue stays single-producer/single-consumer.
+const GAP_QUEUE_SLOTS: usize = 16_384;
+
+#[derive(Clone, Copy)]
+struct GapEvent {
+    track: usize,
+    reason: GapReason,
+    start_ms: u64,
+}
+
+struct GapSlot {
+    sequence: AtomicU64,
+    start_ms: AtomicU64,
+    // bit 0: track (0 system, 1 mic); bit 1: reason (0 overrun, 1 device loss)
+    meta: AtomicU8,
+}
+
+struct GapQueue {
+    slots: Box<[GapSlot]>,
+    mask: u64,
+    head: AtomicU64,
+    tail: AtomicU64,
+}
+
+impl GapQueue {
+    fn new() -> Self {
+        Self {
+            slots: (0..GAP_QUEUE_SLOTS)
+                .map(|index| GapSlot {
+                    sequence: AtomicU64::new(index as u64),
+                    start_ms: AtomicU64::new(0),
+                    meta: AtomicU8::new(0),
+                })
+                .collect(),
+            mask: (GAP_QUEUE_SLOTS - 1) as u64,
+            head: AtomicU64::new(0),
+            tail: AtomicU64::new(0),
+        }
+    }
+
+    /// False means the bounded queue is full; the caller surfaces that as a
+    /// typed error rather than silently dropping a gap marker.
+    fn push(&self, event: GapEvent) -> bool {
+        let tail = self.tail.load(Ordering::Relaxed);
+        let slot = &self.slots[(tail & self.mask) as usize];
+        if slot.sequence.load(Ordering::Acquire) != tail {
+            return false;
+        }
+        let reason_bit = match event.reason {
+            GapReason::Overrun => 0,
+            GapReason::DeviceLoss => 1,
+        };
+        slot.start_ms.store(event.start_ms, Ordering::Relaxed);
+        slot.meta
+            .store((event.track as u8) | (reason_bit << 1), Ordering::Relaxed);
+        slot.sequence.store(tail + 1, Ordering::Release);
+        self.tail.store(tail + 1, Ordering::Relaxed);
+        true
+    }
+
+    fn pop(&self) -> Option<GapEvent> {
+        let head = self.head.load(Ordering::Relaxed);
+        let slot = &self.slots[(head & self.mask) as usize];
+        if slot.sequence.load(Ordering::Acquire) != head + 1 {
+            return None;
+        }
+        let meta = slot.meta.load(Ordering::Relaxed);
+        let event = GapEvent {
+            track: (meta & 1) as usize,
+            reason: if meta & 2 == 0 {
+                GapReason::Overrun
+            } else {
+                GapReason::DeviceLoss
+            },
+            start_ms: slot.start_ms.load(Ordering::Relaxed),
+        };
+        slot.sequence
+            .store(head + GAP_QUEUE_SLOTS as u64, Ordering::Release);
+        self.head.store(head + 1, Ordering::Relaxed);
+        Some(event)
+    }
+}
+
+fn record_error(slot: &Mutex<Option<CaptureError>>, error: CaptureError) {
+    let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.is_none() {
+        *guard = Some(error);
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
@@ -52,11 +142,10 @@ fn track_at(index: usize) -> TrackKind {
 struct Control {
     state: AtomicU8,
     writer_finish: AtomicBool,
-    overruns: [AtomicU64; 2],
-    device_losses: [AtomicU64; 2],
-    last_gap_start_ms: [AtomicU64; 2],
-    // Only the writer touches this, and only when publication fails; the
-    // capture read path never reaches a lock.
+    gap_queues: [GapQueue; 2],
+    // Both locks are touched only on failure paths (reader errors, writer
+    // publication errors and stop after joins), never on a successful sample.
+    reader_error: Mutex<Option<CaptureError>>,
     writer_error: Mutex<Option<CaptureError>>,
 }
 
@@ -65,21 +154,26 @@ impl Control {
         Self {
             state: AtomicU8::new(RUNNING),
             writer_finish: AtomicBool::new(false),
-            overruns: std::array::from_fn(|_| AtomicU64::new(0)),
-            device_losses: std::array::from_fn(|_| AtomicU64::new(0)),
-            last_gap_start_ms: std::array::from_fn(|_| AtomicU64::new(0)),
+            gap_queues: [GapQueue::new(), GapQueue::new()],
+            reader_error: Mutex::new(None),
             writer_error: Mutex::new(None),
         }
     }
+}
 
-    fn record_error(&self, error: CaptureError) {
-        let mut guard = self
-            .writer_error
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if guard.is_none() {
-            *guard = Some(error);
-        }
+fn enqueue_gap(control: &Control, track: usize, reason: GapReason, clock: &SessionClock) {
+    let event = GapEvent {
+        track,
+        reason,
+        // Captured by the reader at the moment the gap is detected; the writer
+        // never substitutes its own time for it.
+        start_ms: clock.now().as_millis() as u64,
+    };
+    if !control.gap_queues[track].push(event) {
+        record_error(
+            &control.reader_error,
+            CaptureError::Backend("gap event queue full".to_owned()),
+        );
     }
 }
 
@@ -199,16 +293,33 @@ impl CaptureEngine {
             .map_err(|_| CaptureError::Backend("capture writer thread panicked".to_owned()))?;
         self.started = false;
 
-        let error = self
+        // A failed capture track takes precedence over a publication failure:
+        // it is the root cause the caller needs to see.
+        let reader_error = self
+            .control
+            .reader_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(error) = reader_error {
+            return Err(error);
+        }
+        let writer_error = self
             .control
             .writer_error
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        match error {
+        match writer_error {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    /// Elapsed time on the session clock, in milliseconds. Shared by gap
+    /// timestamps and by callers that display recording time.
+    pub fn elapsed_ms(&self) -> u64 {
+        self.clock.now().as_millis() as u64
     }
 
     fn require_started(&self, operation: &str) -> Result<(), CaptureError> {
@@ -263,22 +374,27 @@ fn reader_loop(
             Ok(count) => {
                 let count = count.min(buf.len());
                 if ring.push(&buf[..count]).is_err() {
-                    let now_ms = clock.now().as_millis() as u64;
-                    control.last_gap_start_ms[index].store(now_ms, Ordering::Release);
-                    control.overruns[index].fetch_add(1, Ordering::AcqRel);
+                    enqueue_gap(&control, index, GapReason::Overrun, &clock);
                 }
             }
             Err(CaptureError::DeviceLost(_)) => {
-                let now_ms = clock.now().as_millis() as u64;
-                control.last_gap_start_ms[index].store(now_ms, Ordering::Release);
-                control.device_losses[index].fetch_add(1, Ordering::AcqRel);
-                // The source handle is owned by this thread. Re-arm it in
-                // place: `open` is object-unsafe and the trait carries no
-                // device id, so a backend-specific reopen belongs to the
-                // backend task.
-                let _ = source.resume();
+                enqueue_gap(&control, index, GapReason::DeviceLoss, &clock);
+                // The backend remembers its own device id and re-arms the
+                // hardware here. A failed reconnect is a typed error and ends
+                // this track rather than silently continuing on a dead device.
+                if let Err(error) = source.reconnect() {
+                    record_error(&control.reader_error, error);
+                    break;
+                }
             }
-            Err(_) => break,
+            Err(error) => {
+                // Keep GapReason unchanged: any other read failure also opens
+                // a DeviceLoss gap for the rest of this track, but the caller
+                // sees the original typed error from stop().
+                enqueue_gap(&control, index, GapReason::DeviceLoss, &clock);
+                record_error(&control.reader_error, error);
+                break;
+            }
         }
     }
     let _ = source.close();
@@ -306,26 +422,35 @@ fn publish_chunk(
     Ok(())
 }
 
-fn drain_gap_counter(
+fn drain_gaps(
     control: &Control,
     session_dir: &Path,
     clock: &SessionClock,
-    index: usize,
-    counter: &AtomicU64,
-    reason: GapReason,
-    seen: &mut u64,
 ) -> Result<(), CaptureError> {
-    let current = counter.load(Ordering::Acquire);
-    while *seen < current {
+    let mut events = Vec::new();
+    for index in 0..2 {
+        while let Some(event) = control.gap_queues[index].pop() {
+            events.push(event);
+        }
+    }
+    // The two readers detect gaps concurrently, so their queues can hold
+    // events from different instants. Publish one pass in timestamp order to
+    // keep gaps.jsonl globally monotonic.
+    events.sort_by_key(|event| event.start_ms);
+    for event in events {
+        if event.track >= 2 {
+            return Err(CaptureError::Backend("invalid gap track".to_owned()));
+        }
         append_gap(
             session_dir,
             &GapMarker {
-                start_ms: control.last_gap_start_ms[index].load(Ordering::Acquire),
+                // Preserve the reader's detection time; only the end of the
+                // gap is observed here on the writer thread.
+                start_ms: event.start_ms,
                 end_ms: clock.now().as_millis() as u64,
-                reason,
+                reason: event.reason,
             },
         )?;
-        *seen += 1;
     }
     Ok(())
 }
@@ -346,8 +471,6 @@ fn writer_loop(
     ];
     let mut scratch = vec![0.0f32; chunk_samples.min(MAX_DRAIN_SAMPLES)];
     let mut next_chunk = [0u32; 2];
-    let mut seen_overruns = [0u64; 2];
-    let mut seen_losses = [0u64; 2];
 
     loop {
         let mut drained = false;
@@ -371,33 +494,14 @@ fn writer_loop(
                             &mut next_chunk[index],
                             &mut pending[index],
                         ) {
-                            control.record_error(err);
+                            record_error(&control.writer_error, err);
                         }
                     }
                 }
             }
-            if let Err(err) = drain_gap_counter(
-                &control,
-                &session_dir,
-                &clock,
-                index,
-                &control.overruns[index],
-                GapReason::Overrun,
-                &mut seen_overruns[index],
-            ) {
-                control.record_error(err);
-            }
-            if let Err(err) = drain_gap_counter(
-                &control,
-                &session_dir,
-                &clock,
-                index,
-                &control.device_losses[index],
-                GapReason::DeviceLoss,
-                &mut seen_losses[index],
-            ) {
-                control.record_error(err);
-            }
+        }
+        if let Err(err) = drain_gaps(&control, &session_dir, &clock) {
+            record_error(&control.writer_error, err);
         }
 
         if control.writer_finish.load(Ordering::Acquire) && !drained {
@@ -410,7 +514,7 @@ fn writer_loop(
                         &mut next_chunk[index],
                         &mut pending[index],
                     ) {
-                        control.record_error(err);
+                        record_error(&control.writer_error, err);
                     }
                 }
             }

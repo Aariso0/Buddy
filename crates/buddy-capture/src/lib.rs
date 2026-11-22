@@ -65,5 +65,12 @@ pub trait AudioSource: Send {
 
     fn pause(&mut self) -> Result<(), CaptureError>;
     fn resume(&mut self) -> Result<(), CaptureError>;
+
+    /// Re-arm this source after a device loss. Backends remember their own
+    /// device id; on success the source must be ready to read again, otherwise
+    /// this returns a typed error. Object-safe so the engine can call it on a
+    /// boxed source.
+    fn reconnect(&mut self) -> Result<(), CaptureError>;
+
     fn close(&mut self) -> Result<(), CaptureError>;
 }

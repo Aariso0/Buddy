@@ -99,6 +99,13 @@ impl AudioSource for FakeAudioSource {
         Ok(())
     }
 
+    fn reconnect(&mut self) -> Result<(), CaptureError> {
+        // The fake has no hardware: clearing any one-shot injected error is
+        // its whole re-arm, leaving the remaining script available to read.
+        self.pending_error = None;
+        Ok(())
+    }
+
     fn close(&mut self) -> Result<(), CaptureError> {
         Ok(())
     }

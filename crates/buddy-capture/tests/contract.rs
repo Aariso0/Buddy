@@ -1,8 +1,12 @@
 use buddy_capture::chunks::*;
 use buddy_capture::engine::*;
 use buddy_capture::fake::FakeAudioSource;
-use buddy_capture::{AudioSource, CaptureError, TrackKind};
+use buddy_capture::{AudioSource, CaptureError, DeviceInfo, TrackKind};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[test]
 fn fake_source_delivers_samples_without_allocating_in_caller() {
@@ -97,6 +101,137 @@ fn truncated_chunk_is_a_typed_error() {
     ));
 }
 
+/// Handles shared with a `ControlledSource` so a test can inject errors while
+/// the engine's reader thread is running.
+#[derive(Clone)]
+struct SourceHandle {
+    injection: Arc<Mutex<Option<CaptureError>>>,
+    reads: Arc<AtomicUsize>,
+    reconnects: Arc<AtomicUsize>,
+    pauses: Arc<AtomicUsize>,
+}
+
+impl SourceHandle {
+    fn inject(&self, error: CaptureError) {
+        *self.injection.lock().unwrap() = Some(error);
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+
+    fn reconnects(&self) -> usize {
+        self.reconnects.load(Ordering::SeqCst)
+    }
+
+    fn pauses(&self) -> usize {
+        self.pauses.load(Ordering::SeqCst)
+    }
+}
+
+/// Test source with controllable error injection, a configurable per-read
+/// delay for distinguishable gap timestamps, and observable pause/reconnect
+/// calls. `frames_total` can be effectively unbounded to keep the source alive
+/// until `stop()`.
+struct ControlledSource {
+    kind: TrackKind,
+    frames_total: usize,
+    position: usize,
+    delay: Duration,
+    handle: SourceHandle,
+}
+
+impl ControlledSource {
+    fn new(kind: TrackKind, frames_total: usize, delay: Duration) -> (Self, SourceHandle) {
+        let handle = SourceHandle {
+            injection: Arc::new(Mutex::new(None)),
+            reads: Arc::new(AtomicUsize::new(0)),
+            reconnects: Arc::new(AtomicUsize::new(0)),
+            pauses: Arc::new(AtomicUsize::new(0)),
+        };
+        (
+            Self {
+                kind,
+                frames_total,
+                position: 0,
+                delay,
+                handle: handle.clone(),
+            },
+            handle,
+        )
+    }
+}
+
+impl AudioSource for ControlledSource {
+    fn kind(&self) -> TrackKind {
+        self.kind.clone()
+    }
+
+    fn sample_rate(&self) -> u32 {
+        48_000
+    }
+
+    fn list_devices(_kind: TrackKind) -> Result<Vec<DeviceInfo>, CaptureError> {
+        Ok(Vec::new())
+    }
+
+    fn open(_device_id: &str) -> Result<Self, CaptureError> {
+        Err(CaptureError::Backend(
+            "test source has no device id".to_owned(),
+        ))
+    }
+
+    fn read(&mut self, out: &mut [f32]) -> Result<usize, CaptureError> {
+        self.handle.reads.fetch_add(1, Ordering::SeqCst);
+        if !self.delay.is_zero() {
+            thread::sleep(self.delay);
+        }
+        if let Some(error) = self.handle.injection.lock().unwrap().take() {
+            return Err(error);
+        }
+        let count = (self.frames_total - self.position).min(out.len());
+        let value = if self.kind == TrackKind::System {
+            0.5
+        } else {
+            0.25
+        };
+        out[..count].fill(value);
+        out[count..].fill(0.0);
+        self.position += count;
+        Ok(count)
+    }
+
+    fn pause(&mut self) -> Result<(), CaptureError> {
+        self.handle.pauses.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), CaptureError> {
+        Ok(())
+    }
+
+    fn reconnect(&mut self) -> Result<(), CaptureError> {
+        self.handle.reconnects.fetch_add(1, Ordering::SeqCst);
+        *self.handle.injection.lock().unwrap() = None;
+        Ok(())
+    }
+
+    fn close(&mut self) -> Result<(), CaptureError> {
+        Ok(())
+    }
+}
+
+fn wait_for(predicate: impl Fn() -> bool) {
+    let start = Instant::now();
+    while !predicate() {
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "timed out waiting for condition"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn engine_with(system: Vec<f32>, mic: Vec<f32>, dir: &Path) -> CaptureEngine {
     CaptureEngine::new(
         "11111111-1111-4111-8111-111111111111",
@@ -130,16 +265,41 @@ fn both_tracks_record_simultaneously() {
 #[test]
 fn pause_resume_keeps_monotonic_timeline() {
     let dir = tempfile::tempdir().unwrap();
-    let mut engine = engine_with(vec![0.5; 144_000], vec![0.25; 144_000], dir.path());
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
+    let mut engine = CaptureEngine::new(
+        "11111111-1111-4111-8111-111111111111",
+        dir.path(),
+        buddy_core::clock::SessionClock::new(),
+        Box::new(FakeAudioSource::from_samples(
+            TrackKind::System,
+            48_000,
+            vec![0.5; 144_000],
+        )),
+        Box::new(mic),
+        CaptureConfig::default(),
+    );
     engine.start().unwrap();
     engine.pause().unwrap();
+    // Wait until the reader has actually applied pause, then capture the
+    // boundary on the same clock that stamps gap markers.
+    wait_for(|| handle.pauses() >= 1);
+    let pause_boundary_ms = engine.elapsed_ms();
+    handle.inject(CaptureError::DeviceLost("mic-after-resume".into()));
     engine.resume().unwrap();
     engine.stop().unwrap();
-    let starts: Vec<u64> = read_gaps(dir.path())
-        .unwrap()
-        .iter()
-        .map(|g| g.start_ms)
-        .collect();
+
+    let gaps = read_gaps(dir.path()).unwrap();
+    let starts: Vec<u64> = gaps.iter().map(|g| g.start_ms).collect();
+    assert!(
+        !starts.is_empty(),
+        "the injected gap must actually be recorded"
+    );
+    assert!(
+        starts
+            .iter()
+            .any(|&start| start >= pause_boundary_ms),
+        "a gap injected after resume must not be stamped before the pause boundary ({pause_boundary_ms}): {starts:?}"
+    );
     assert!(starts.windows(2).all(|w| w[0] <= w[1]));
     assert!(read_chunk_index(dir.path())
         .unwrap()
@@ -256,6 +416,129 @@ fn writer_preserves_samples_across_chunk_boundaries() {
         restored.extend(read_chunk_samples(dir.path(), chunk).unwrap());
     }
     assert_eq!(restored, samples);
+}
+
+#[test]
+fn gap_events_keep_per_event_timestamps() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::from_millis(6));
+    let mut engine = CaptureEngine::new(
+        "11111111-1111-4111-8111-111111111111",
+        dir.path(),
+        buddy_core::clock::SessionClock::new(),
+        Box::new(FakeAudioSource::from_samples(
+            TrackKind::System,
+            48_000,
+            vec![0.5; 96_000],
+        )),
+        Box::new(mic),
+        CaptureConfig::default(),
+    );
+    engine.start().unwrap();
+    wait_for(|| handle.reads() >= 1);
+    for i in 0..3 {
+        let before = handle.reconnects();
+        handle.inject(CaptureError::DeviceLost(format!("mic-{i}")));
+        wait_for(|| handle.reconnects() > before);
+    }
+    engine.stop().unwrap();
+
+    let losses: Vec<_> = read_gaps(dir.path())
+        .unwrap()
+        .into_iter()
+        .filter(|gap| matches!(gap.reason, GapReason::DeviceLoss))
+        .collect();
+    assert!(
+        losses.len() >= 3,
+        "expected one marker per loss event, got {}",
+        losses.len()
+    );
+    let starts: Vec<u64> = losses.iter().map(|gap| gap.start_ms).collect();
+    assert!(
+        starts.windows(2).all(|pair| pair[0] <= pair[1]),
+        "gap timestamps must be monotonic: {starts:?}"
+    );
+    assert!(
+        starts.iter().any(|&start| start > starts[0]),
+        "each gap must keep its own detection time, not a shared overwritten slot: {starts:?}"
+    );
+}
+
+#[test]
+fn generic_read_error_surfaces_from_stop_and_records_gap() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
+    handle.inject(CaptureError::Backend("mic decoder exploded".to_owned()));
+    let mut engine = CaptureEngine::new(
+        "11111111-1111-4111-8111-111111111111",
+        dir.path(),
+        buddy_core::clock::SessionClock::new(),
+        Box::new(FakeAudioSource::from_samples(
+            TrackKind::System,
+            48_000,
+            vec![0.5; 96_000],
+        )),
+        Box::new(mic),
+        CaptureConfig::default(),
+    );
+    engine.start().unwrap();
+    wait_for(|| handle.reads() >= 1);
+    let result = engine.stop();
+    assert!(
+        matches!(
+            &result,
+            Err(CaptureError::Backend(message)) if message.contains("mic decoder exploded")
+        ),
+        "a failed track must not be reported as clean success: {result:?}"
+    );
+    let gaps = read_gaps(dir.path()).unwrap();
+    assert_eq!(
+        gaps.iter()
+            .filter(|gap| matches!(gap.reason, GapReason::DeviceLoss))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn device_loss_reconnects_source_and_keeps_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
+    handle.inject(CaptureError::DeviceLost("mic-1".into()));
+    let mut engine = CaptureEngine::new(
+        "11111111-1111-4111-8111-111111111111",
+        dir.path(),
+        buddy_core::clock::SessionClock::new(),
+        Box::new(FakeAudioSource::from_samples(
+            TrackKind::System,
+            48_000,
+            vec![0.5; 96_000],
+        )),
+        Box::new(mic),
+        CaptureConfig::default(),
+    );
+    engine.start().unwrap();
+    wait_for(|| handle.reconnects() >= 1);
+    engine.stop().unwrap();
+    assert!(
+        handle.reconnects() >= 1,
+        "the DeviceLost path must call reconnect(), not resume()"
+    );
+    assert!(
+        handle.reads() > 1,
+        "the reconnected source must keep reading"
+    );
+    let gaps = read_gaps(dir.path()).unwrap();
+    assert_eq!(
+        gaps.iter()
+            .filter(|gap| matches!(gap.reason, GapReason::DeviceLoss))
+            .count(),
+        1
+    );
+    assert!(read_chunk_index(dir.path())
+        .unwrap()
+        .iter()
+        .any(|chunk| chunk.track == TrackKind::Mic));
 }
 
 #[test]
