@@ -28,6 +28,14 @@ fn create_read_recover_round_trip() {
 }
 
 #[test]
+fn create_session_creates_missing_ancestors() {
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("data").join("sessions");
+    create_session(&nested, id(), now()).unwrap();
+    assert_eq!(read_session(&nested, id()).unwrap().id, id());
+}
+
+#[test]
 fn create_session_rejects_existing_id_without_changing_it() {
     let root = tempfile::tempdir().unwrap();
     let manifest = create_session(root.path(), id(), now()).unwrap();

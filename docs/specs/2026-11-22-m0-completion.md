@@ -24,8 +24,9 @@ A later review pass found ten still-valid findings, all fixed on `application` b
 - Session creation reserves its directory exclusively; reads and recovery reject a manifest id that differs from its directory id; manifest and settings writes use unique, exclusively created staging files with failure cleanup.
 - The foundation plan's icon command and `publish` dependency list, and this document's table escaping, were corrected.
 - macOS: `generate_context!()` is called only once, inside `app_context()`, so the macOS-only Info.plist embedding does not define `_EMBED_INFO_PLIST` twice in the desktop test build.
+- A final review replaced `sort -V` with semver precedence for tag selection and version comparison, added best-effort directory fsync for a new session's ancestors and parent before the manifest rename, and made settings fsync reuse the normalized parent so bare filenames sync `.`.
 
-Verification after the fixes: `cargo fmt --all -- --check`, `cargo test --workspace` (17 tests passing), `pnpm --filter @buddy/desktop build`, workflow YAML/config JSON parse, a dry run of the legal staging script, and a live Vite start on port 5173 — all green.
+Verification after the fixes: `cargo fmt --all -- --check`, `cargo test --workspace` (18 tests passing), `pnpm --filter @buddy/desktop build`, workflow YAML/config JSON parse, a dry run of the legal staging script, and a live Vite start on port 5173 — all green.
 
 ## What shipped
 
@@ -58,7 +59,6 @@ Verification after the fixes: `cargo fmt --all -- --check`, `cargo test --worksp
 
 - Test-file import suppression and untested `Finalizing`/`Complete` recovery mappings.
 - TypeScript strict flags are present but not enforced; add `tsc --noEmit` when real UI code lands.
-- The `sort -V` version comparison treats prerelease tags incorrectly; replace it with semver-aware comparison before publishing any `-rc` version.
 - Root `clean` script uses `require()` under a `type: module` package; `node -e` is CommonJS today but a future Node default could change that.
 
 Resolved during review fixes: session directories are now reserved exclusively; manifest ids are checked against their directory id; both session and settings writes use unique, exclusively created staging files. The Linux `.tar.gz` now stages `NOTICE`, `LICENSE` and an exact-version MPL source-locations file before upload.

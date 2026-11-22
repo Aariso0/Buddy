@@ -84,14 +84,13 @@ pub fn save_settings(path: &Path, settings: &Settings) -> Result<(), SettingsErr
     }
 
     // The rename has already committed the file; directory fsync is only a
-    // durability hint. A plain File::open on a directory fails on Windows, so
-    // keep this Unix-only and best-effort (same ruling as Task 2).
+    // durability hint. Reuse the normalized parent so bare filenames sync `.`.
+    // File::open on a directory fails on Windows, so keep this Unix-only and
+    // best-effort (same ruling as Task 2).
     #[cfg(unix)]
     {
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
         }
     }
 

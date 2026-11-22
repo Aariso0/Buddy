@@ -81,6 +81,31 @@ fn session_dir(root: &Path, id: &str) -> Result<PathBuf, SessionError> {
     Ok(root.join(id_path))
 }
 
+// Directory fsync is durability hardening only: it must never turn a successful
+// write into an error. Plain File::open on a directory fails on Windows (it
+// needs FILE_FLAG_BACKUP_SEMANTICS), so keep this Unix-only and best-effort.
+#[cfg(unix)]
+fn sync_dir(path: &Path) {
+    if let Ok(dir) = fs::File::open(path) {
+        let _ = dir.sync_all();
+    }
+}
+
+#[cfg(unix)]
+fn sync_dir_chain(path: &Path) {
+    let mut current = Some(path);
+    while let Some(dir) = current {
+        // A one-component relative path has an empty parent, which means `.`.
+        let target = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        sync_dir(target);
+        current = dir.parent();
+    }
+}
+
 /// Create a session in `recording` state, writing `session.json` atomically.
 /// The session directory is reserved exclusively, so an existing id is an
 /// error rather than an overwrite of its manifest.
@@ -101,6 +126,11 @@ pub fn create_session(
         }
         Err(err) => return Err(SessionError::Io(err)),
     }
+
+    // Persist the reserved entry in its parent, plus any ancestors created
+    // above, before write_manifest publishes the manifest inside it.
+    #[cfg(unix)]
+    sync_dir_chain(&parent);
 
     let manifest = SessionManifest {
         id: id.to_owned(),
@@ -137,18 +167,10 @@ fn write_manifest(dir: &Path, manifest: &SessionManifest) -> Result<(), SessionE
 
     fs::rename(&tmp_path, dir.join("session.json"))?;
 
-    // The rename has already committed `session.json`. Directory fsync is
-    // durability hardening only, so it must never turn a successful write into
-    // a reported failure. A plain File::open on a directory fails on Windows
-    // (it needs FILE_FLAG_BACKUP_SEMANTICS), so keep this step Unix-only and
-    // best-effort; Windows CI still exercises create_session via the existing
-    // round-trip test.
+    // The rename has already committed `session.json`; fsync only hardens
+    // durability and must not turn a successful write into an error.
     #[cfg(unix)]
-    {
-        if let Ok(parent) = fs::File::open(dir) {
-            let _ = parent.sync_all();
-        }
-    }
+    sync_dir(dir);
 
     Ok(())
 }
