@@ -228,7 +228,13 @@ const SESSION_ID: &str = "11111111-1111-4111-8111-111111111111";
 /// has a manifest to finalize.
 fn session_dir_under(root: &Path) -> PathBuf {
     let sessions_root = root.join("sessions");
-    buddy_core::session::create_session(&sessions_root, SESSION_ID, chrono::Utc::now()).unwrap();
+    buddy_core::session::create_session(
+        &sessions_root,
+        SESSION_ID,
+        chrono::Utc::now(),
+        buddy_core::session::Preset::Lecture,
+    )
+    .unwrap();
     sessions_root.join(SESSION_ID)
 }
 

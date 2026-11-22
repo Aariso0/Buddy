@@ -119,6 +119,7 @@ pub fn create_session(
     root: &Path,
     id: &str,
     now: DateTime<Utc>,
+    preset: Preset,
 ) -> Result<SessionManifest, SessionError> {
     let dir = session_dir(root, id)?;
     let parent = dir.parent().unwrap_or_else(|| Path::new("."));
@@ -144,7 +145,7 @@ pub fn create_session(
         state: SessionState::Recording,
         started_at: now,
         ended_at: None,
-        preset: Preset::Lecture,
+        preset,
     };
 
     // Cleanup only ever touches the directory reserved by this attempt. An

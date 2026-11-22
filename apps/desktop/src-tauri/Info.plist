@@ -4,5 +4,7 @@
 <dict>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Buddy needs audio capture access to record the system audio and microphone tracks of your lectures and meetings.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Buddy needs microphone access to record the microphone track of your lectures and meetings.</string>
 </dict>
 </plist>

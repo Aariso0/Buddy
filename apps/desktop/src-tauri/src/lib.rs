@@ -245,7 +245,8 @@ impl RecordingController {
         let mut session_created = false;
 
         let outcome = (|| -> Result<(ActiveRecording, RecordingView), String> {
-            create_session(&sessions_root, &id, Utc::now()).map_err(|error| error.to_string())?;
+            create_session(&sessions_root, &id, Utc::now(), preset.clone())
+                .map_err(|error| error.to_string())?;
             session_created = true;
 
             let system = self.factory.open(TrackKind::System, SYSTEM_DEVICE_ID)?;
@@ -365,21 +366,26 @@ impl RecordingController {
 
         // Joining the readers and writer is blocking; the mutex is released.
         let result = active.engine.stop().map_err(|error| error.to_string());
-        let mut next_view = view_for(Some(&active));
-        if let Err(ref error) = result {
-            next_view.hud = format!("{} · stop failed: {error}", next_view.hud);
-        } else {
-            next_view = view_for(None);
-        }
+        // `CaptureEngine::stop` clears its `started` flag before the fallible
+        // join/finalize work, so an engine that fails to stop refuses every
+        // later pause/resume/stop/start. Restoring it would wedge the app in a
+        // permanent REC state. The active value is dropped below on both paths.
+        let next_view = match &result {
+            Ok(()) => view_for(None),
+            Err(error) => {
+                let mut view = view_for(None);
+                view.hud = format!("{} · stop failed: {error}", view.hud);
+                view
+            }
+        };
 
         {
             let mut slot = self.lock_slot();
             slot.busy = false;
-            if result.is_err() {
-                // Keep the session visible so the failure can be retried or
-                // recovered; never report a clean idle state after an error.
-                slot.active = Some(active);
-            }
+            // The slot stays empty: a successful stop ends the recording and a
+            // failed stop leaves an engine that must not be reused. A new start
+            // can reclaim the slot immediately; the error text stays in the HUD.
+            debug_assert!(slot.active.is_none());
         }
         self.publish(next_view);
         result
@@ -671,6 +677,45 @@ mod tests {
             "unexpected error: {error}"
         );
         assert!(!app.window_title().contains("REC"));
+    }
+
+    #[test]
+    fn stop_error_discards_the_dead_engine_and_allows_a_new_start() {
+        let dir = tempfile::tempdir().expect("a temporary data directory");
+        let app = TestApp::new(dir.path(), Box::new(FakeSourceFactory));
+        let id = app.call("start_recording", "lecture").unwrap();
+        assert!(app.window_title().contains("REC"));
+
+        // Remove the reserved session so finalize_session returns a typed error
+        // from engine.stop() after the engine has already marked itself stopped.
+        let session_dir = dir.path().join("sessions").join(&id);
+        fs::remove_dir_all(&session_dir).expect("the session directory must exist");
+
+        let error = app
+            .call("stop_recording", &id)
+            .expect_err("a missing manifest must fail the stop command");
+        assert!(
+            error.contains("finalize session"),
+            "unexpected error: {error}"
+        );
+        assert!(!app.window_title().contains("REC"));
+        assert!(app.hud_text().contains("stop failed"));
+
+        // The wedged state is gone: a new recording can start and show REC.
+        let next_id = app.call("start_recording", "meeting").unwrap();
+        assert_ne!(next_id, id);
+        assert!(app.window_title().contains("REC"));
+    }
+
+    #[test]
+    fn start_recording_persists_the_requested_preset() {
+        let dir = tempfile::tempdir().expect("a temporary data directory");
+        let app = TestApp::new(dir.path(), Box::new(FakeSourceFactory));
+        let id = app.call("start_recording", "meeting").unwrap();
+        let manifest = buddy_core::session::read_session(&dir.path().join("sessions"), &id)
+            .expect("the session manifest must be readable");
+        assert_eq!(manifest.preset, Preset::Meeting);
+        assert_eq!(manifest.state, buddy_core::session::SessionState::Recording);
     }
 
     #[test]

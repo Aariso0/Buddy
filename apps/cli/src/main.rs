@@ -1,4 +1,4 @@
-use buddy_core::session::{create_session, read_session, recover_session, SessionManifest};
+use buddy_core::session::{create_session, read_session, recover_session, Preset, SessionManifest};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -67,7 +67,7 @@ fn run(command: Commands) -> Result<String, Box<dyn std::error::Error>> {
     match command {
         Commands::Session { command } => match command {
             SessionCommands::New { root, id } => {
-                let manifest = create_session(&root, &id, Utc::now())?;
+                let manifest = create_session(&root, &id, Utc::now(), Preset::Lecture)?;
                 Ok(serde_json::to_string(&manifest)?)
             }
             SessionCommands::Show { root, id } => {
