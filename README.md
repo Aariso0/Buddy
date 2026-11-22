@@ -9,7 +9,7 @@
 <br>
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-22d3ee?labelColor=0d1117)](LICENSE)
-[![Status](https://img.shields.io/badge/status-planning-22d3ee?labelColor=0d1117)](plan.md)
+[![Status](https://img.shields.io/badge/status-in--development-22d3ee?labelColor=0d1117)](plan.md)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-22d3ee?labelColor=0d1117)](#platforms)
 [![Built with](https://img.shields.io/badge/built%20with-Tauri%20%C2%B7%20Rust%20%C2%B7%20React-22d3ee?labelColor=0d1117)](#tech-stack)
 [![Privacy](https://img.shields.io/badge/privacy-local--first%20%C2%B7%20E2EE%20sync-3fb950?labelColor=0d1117)](#privacy)
@@ -22,7 +22,7 @@
 
 ---
 
-> **Status: planning.** There is nothing to install yet. This README describes what Buddy is being built to do. Progress is tracked in [`plan.md`](plan.md).
+> **Status: in development.** M0 (foundation) and M1 (two-track audio capture) are implemented and reviewed on the `M1/Audio_Capture` branch; no release tag exists yet. Screen/video capture, transcription, OCR, sync and the rest of the MVP are still to come. Progress is tracked in [`plan.md`](plan.md) and the milestone records in [`docs/`](docs/).
 
 ## What is Buddy?
 
@@ -157,7 +157,7 @@ python logo.py --png      # SVGs and PNGs
 
 ## Contributing
 
-Buddy is at the planning stage. The most useful help right now is:
+Buddy is in active development. The most useful help right now is:
 
 - Testing system-audio and screen-capture behavior on Windows, macOS, and Linux.
 - Hindi and English audio samples with reference transcripts for accuracy testing.

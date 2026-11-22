@@ -1,10 +1,10 @@
 # Buddy MVP on the `application` branch — design
 
-> Date: 2026-11-22. Status: draft for approval. This document covers the MVP only; later milestones are explicitly out of scope here.
+> Date: 2026-11-22. Status: approved. This document covers the MVP only; later milestones are explicitly out of scope here. Implementation progress is recorded in [`docs/specs/2026-11-22-m0-completion.md`](2026-11-22-m0-completion.md) and [`docs/plans/2026-11-22-m1-audio-capture.md`](../plans/2026-11-22-m1-audio-capture.md).
 
 ## 1. Intent and why
 
-Buddy is a local-first recorder for meetings and lectures. The repository currently contains a plan, README, license and brand assets — no source code. The goal of this branch is to deliver the MVP described in `plan.md` §5 and milestones M0–M6 as a working, distributable application, with a CI pipeline that produces release artifacts automatically for Windows, macOS and Linux.
+Buddy is a local-first recorder for meetings and lectures. When this design was written the repository contained only a plan, README, license and brand assets; M0 added the source workspace and M1 added real audio capture. The goal of this branch is to deliver the MVP described in `plan.md` §5 and milestones M0–M6 as a working, distributable application, with a CI pipeline that produces release artifacts automatically for Windows, macOS and Linux.
 
 The driving priority from `plan.md` §2 is that capture comes first: recording must never depend on an AI model, a network connection or an account. The MVP is the smallest release that is genuinely useful on its own — record a real lecture or meeting, get a transcript and slides, find things later, and export.
 
