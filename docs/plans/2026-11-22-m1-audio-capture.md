@@ -23,9 +23,9 @@
 | 5 — Windows WASAPI loopback backend (S2) | complete | `eb136ae`, `5e0500d` | 1 Important test-integrity finding fixed; re-review clean; Windows UNVERIFIED |
 | 6 — macOS backend spike (S1), UNVERIFIED | complete | `7cdb496`, `65d09ef` | 3 Important findings fixed; re-review clean; macOS runtime UNVERIFIED |
 | 7 — Desktop control surface and visible state | complete | `909dc7e`, `f7c7edd` | 1 Critical + 1 Important fixed; re-review clean; macOS desktop compile UNVERIFIED |
-| 8 — Soak jobs, publish gating, legal recheck | in progress | — | implementer running; Windows endpoint decision may require user input |
+| 8 — Soak jobs, publish gating, legal recheck | complete | `7707035`, `d623566` | review Approved + hardening re-review clean; soaks not run locally |
 
-Current branch head: `f7c7edd`. Nothing has been pushed. Windows compilation, contract tests and real loopback capture remain UNVERIFIED on this Linux host and are gated on Task 8's Windows soak. macOS linking, test execution and real capture also remain UNVERIFIED; a clean Apple-target type-check is not a runtime pass. This section is updated after each task's review; the SDD ledger holds the per-finding detail.
+All eight tasks are complete. Current branch head: `d623566`. Nothing has been pushed. The Windows endpoint decision was confirmed by the user: `soak-windows` targets the self-hosted `[self-hosted, windows, buddy-audio-soak]` runner with real endpoints; no virtual device is imposed on users. Windows compilation, contract tests and real loopback capture remain UNVERIFIED on this Linux host and are gated on the self-hosted soak. macOS linking, desktop compilation, test execution and real capture also remain UNVERIFIED; a clean Apple-target type-check is not a runtime pass. Soaks were correctly not run locally, so no soak pass is claimed. This section is updated after each task's review; the SDD ledger holds the per-finding detail.
 
 ### Execution rulings made so far
 
@@ -44,6 +44,8 @@ These are implementation rulings under the binding spec, not scope changes. Each
 - macOS S1 resolved via CoreAudio process taps on 14.2+ (`coreaudio = "=0.6.2"`, `process-tap` feature), no virtual device; ScreenCaptureKit's binding needs macOS 15+ for mic and was rejected. macOS tap teardown is order-pinned (aggregate before tap), worker shutdown is idempotent/bounded, and a `DEVICE_IS_ALIVE` listener plus direct probe makes unplugs typed `DeviceLost` so reconnect works. Apple-target `cargo check --all-targets` passed but proves types only.
 - The desktop shell carries both `NSAudioCaptureUsageDescription` (system taps) and `NSMicrophoneUsageDescription` (mic input) or macOS capture is TCC-denied into silence; it also calls `ensure_data_dir` before the first settings write or session creation. macOS desktop compilation remains UNVERIFIED because no Apple SDK is available for the Tauri crate.
 - A typed stop failure must discard the dead engine and publish an error-annotated idle view: the engine clears `started` before its fallible returns, so restoring it wedges the app on REC. `create_session` takes an explicit `preset` with no hidden default so `start_recording("meeting")` really persists `Meeting` in `session.json`.
+- The Windows soak endpoint decision was escalated to the user, who chose a self-hosted runner with real audio endpoints; `soak-windows` targets `[self-hosted, windows, buddy-audio-soak]`. No virtual-device requirement is imposed on users and no hosted-runner soak pass is faked. Both `soak-linux` and `soak-windows` are `publish.needs` dependencies, so a failed soak blocks release.
+- The ignored `crates/buddy-capture/tests/soak_real.rs` hard-fails without `BUDDY_AUDIO_SOAK=1` and, after hardening, asserts per-track coverage of at least 95% of 3600 s (3420 s), per-chunk length of at least 96 000 interleaved f32 values with at most one partial final chunk, zero gaps and a non-silent System track. The soaks were not run locally; no pass is claimed.
 
 ### Deferred review findings for final review
 
@@ -54,6 +56,8 @@ These are implementation rulings under the binding spec, not scope changes. Each
 - Task 5: `shutdown_worker` swallows timeouts then unbounded `join()` can hang close/reconnect; error slots are consumed so repeat device-loss reads return `Backend("")`; `list_devices`/`spawn_worker` timeouts leave brief stray threads; public `open_for` permits inconsistent kind/id pairs; `reconnect` publishes LIVE before worker success and leaves a stale sample rate; full-ring pushes are dropped without an overflow signal.
 - Task 6: consumed error slots make repeat reads `Backend("")` and allocate on fallback; 500 ms `yield_now` spin; `CHANNELS = 2` without channel normalization for mono/multichannel mics; contract test accepts silent taps (`count > 0` only) and `BUDDY_AUDIO_SOAK=1` cannot catch silence; `list_devices` `Backend` error skips outside soak mode.
 - Task 7: system source not `close()`d on a failed start; discarded title/tray/emit results in the view sink; discarded hotkey/tray toggle errors; missing failed-stop/preset tests (the latter two now covered by the fix round's tests).
+- Task 1 deferred item resolved: `NOTICE` first-party note now correctly lists four workspace crates including `buddy-capture`.
+- Task 8: non-default endpoint assertion in `soak_real.rs` is stricter than the brief and could hard-fail a correctly configured real-endpoint-only runner; Linux/Windows toolchain drift (`pacman` Rust vs `dtolnay/rust-toolchain@stable`) could let compiler versions diverge.
 
 ## Global Constraints
 
