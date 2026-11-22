@@ -3,7 +3,10 @@
 //! Per-OS backends implement [`AudioSource`]; the engine drives any source
 //! through that trait and stamps its chunks with the monotonic session clock.
 
+pub mod chunks;
+pub mod engine;
 pub mod fake;
+pub mod ring;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
