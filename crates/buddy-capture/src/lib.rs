@@ -6,6 +6,8 @@
 pub mod chunks;
 pub mod engine;
 pub mod fake;
+#[cfg(target_os = "linux")]
+pub mod linux;
 pub mod ring;
 
 use serde::{Deserialize, Serialize};
