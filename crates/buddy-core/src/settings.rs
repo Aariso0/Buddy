@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
@@ -50,16 +51,37 @@ pub fn save_settings(path: &Path, settings: &Settings) -> Result<(), SettingsErr
     let bytes = serde_json::to_vec_pretty(settings)
         .map_err(|err| SettingsError::InvalidSettings(err.to_string()))?;
 
-    let mut tmp_name = OsString::from(path.as_os_str());
-    tmp_name.push(".tmp");
-    let tmp_path = PathBuf::from(tmp_name);
+    let file_name = path.file_name().ok_or_else(|| {
+        SettingsError::InvalidSettings("settings path has no file name".to_owned())
+    })?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let mut tmp_name = OsString::from(file_name);
+    tmp_name.push(format!(".{}.tmp", Uuid::new_v4()));
+    let tmp_path = parent.join(tmp_name);
 
-    let mut tmp = fs::File::create(&tmp_path)?;
-    tmp.write_all(&bytes)?;
-    tmp.sync_all()?;
-    drop(tmp);
-
-    fs::rename(&tmp_path, path)?;
+    // Exclusive creation under a unique name prevents overlapping saves from
+    // truncating or publishing each other's staging file. The handle is closed
+    // before cleanup so a failed attempt leaves no staging file behind.
+    let write_result = (|| -> Result<(), SettingsError> {
+        let mut tmp = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        tmp.write_all(&bytes)?;
+        tmp.sync_all()?;
+        drop(tmp);
+        fs::rename(&tmp_path, path)?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
 
     // The rename has already committed the file; directory fsync is only a
     // durability hint. A plain File::open on a directory fails on Windows, so

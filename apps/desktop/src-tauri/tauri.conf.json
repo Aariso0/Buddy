@@ -5,6 +5,7 @@
   "identifier": "com.buddy.app",
   "build": {
     "beforeBuildCommand": "pnpm build",
+    "beforeDevCommand": "pnpm exec vite --port 5173 --strictPort",
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173"
   },

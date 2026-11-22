@@ -44,6 +44,10 @@ pub struct RecoveryOutcome {
 pub enum SessionError {
     #[error("invalid session id: {0}")]
     InvalidSessionId(String),
+    #[error("session already exists: {0}")]
+    AlreadyExists(String),
+    #[error("session id mismatch: manifest declares {manifest} but directory is {directory}")]
+    IdMismatch { manifest: String, directory: String },
     #[error("unsupported session format version: {0}")]
     UnsupportedVersion(u32),
     #[error("invalid session manifest: {0}")]
@@ -78,13 +82,25 @@ fn session_dir(root: &Path, id: &str) -> Result<PathBuf, SessionError> {
 }
 
 /// Create a session in `recording` state, writing `session.json` atomically.
+/// The session directory is reserved exclusively, so an existing id is an
+/// error rather than an overwrite of its manifest.
 pub fn create_session(
     root: &Path,
     id: &str,
     now: DateTime<Utc>,
 ) -> Result<SessionManifest, SessionError> {
     let dir = session_dir(root, id)?;
-    fs::create_dir_all(&dir)?;
+    let parent = dir.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.as_os_str().is_empty() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::create_dir(&dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(SessionError::AlreadyExists(id.to_owned()));
+        }
+        Err(err) => return Err(SessionError::Io(err)),
+    }
 
     let manifest = SessionManifest {
         id: id.to_owned(),
@@ -95,16 +111,26 @@ pub fn create_session(
         preset: Preset::Lecture,
     };
 
-    write_manifest(&dir, &manifest)?;
+    // Cleanup only ever touches the directory reserved by this attempt. An
+    // existing session was rejected above and cannot reach this point.
+    if let Err(err) = write_manifest(&dir, &manifest) {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(err);
+    }
     Ok(manifest)
 }
 
 fn write_manifest(dir: &Path, manifest: &SessionManifest) -> Result<(), SessionError> {
     let bytes = serde_json::to_vec_pretty(manifest)
         .map_err(|e| SessionError::InvalidManifest(e.to_string()))?;
-    let tmp_path = dir.join("session.json.tmp");
+    // A unique, exclusively created staging name keeps overlapping writes from
+    // truncating or renaming each other's in-progress manifest.
+    let tmp_path = dir.join(format!("session.json.{}.tmp", Uuid::new_v4()));
 
-    let mut tmp = fs::File::create(&tmp_path)?;
+    let mut tmp = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)?;
     tmp.write_all(&bytes)?;
     tmp.sync_all()?;
     drop(tmp);
@@ -132,7 +158,14 @@ fn write_manifest(dir: &Path, manifest: &SessionManifest) -> Result<(), SessionE
 pub fn read_session(root: &Path, id: &str) -> Result<SessionManifest, SessionError> {
     let dir = session_dir(root, id)?;
     let bytes = fs::read(dir.join("session.json"))?;
-    parse_manifest(&bytes)
+    let manifest = parse_manifest(&bytes)?;
+    if manifest.id != id {
+        return Err(SessionError::IdMismatch {
+            manifest: manifest.id,
+            directory: id.to_owned(),
+        });
+    }
+    Ok(manifest)
 }
 
 fn parse_manifest(bytes: &[u8]) -> Result<SessionManifest, SessionError> {

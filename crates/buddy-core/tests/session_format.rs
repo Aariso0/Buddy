@@ -28,6 +28,39 @@ fn create_read_recover_round_trip() {
 }
 
 #[test]
+fn create_session_rejects_existing_id_without_changing_it() {
+    let root = tempfile::tempdir().unwrap();
+    let manifest = create_session(root.path(), id(), now()).unwrap();
+    assert!(matches!(
+        create_session(root.path(), id(), now()),
+        Err(SessionError::AlreadyExists(_))
+    ));
+    assert_eq!(read_session(root.path(), id()).unwrap(), manifest);
+}
+
+#[test]
+fn manifest_id_must_match_directory_id() {
+    let root = tempfile::tempdir().unwrap();
+    let other_id = "22222222-2222-4222-8222-222222222222";
+    create_session(root.path(), other_id, now()).unwrap();
+    let dir = root.path().join(id());
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::copy(
+        root.path().join(other_id).join("session.json"),
+        dir.join("session.json"),
+    )
+    .unwrap();
+    assert!(matches!(
+        read_session(root.path(), id()),
+        Err(SessionError::IdMismatch { .. })
+    ));
+    assert!(matches!(
+        recover_session(root.path(), id()),
+        Err(SessionError::IdMismatch { .. })
+    ));
+}
+
+#[test]
 fn corrupt_manifest_is_typed_error() {
     let root = tempfile::tempdir().unwrap();
     let dir = root.path().join(id());

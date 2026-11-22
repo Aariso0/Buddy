@@ -137,9 +137,30 @@ jobs:
         run: |
           node -e "const fs = require('node:fs'); const p = 'apps/desktop/src-tauri/tauri.conf.json'; const c = JSON.parse(fs.readFileSync(p, 'utf8')); c.version = process.env.RELEASE_VERSION; fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');"
       - name: Build Linux bundles
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          set -euo pipefail
           pnpm --filter @buddy/desktop exec tauri build --bundles appimage,deb,rpm
-          tar czf buddy-linux-x86_64.tar.gz -C target/release buddy
+
+          # Stage the legal files inside the distributed archive. Adding bundle
+          # resources alone would not put them in the tar.gz we ship.
+          stage="$(mktemp -d)"
+          mkdir -p "$stage/legal"
+          cp NOTICE LICENSE "$stage/legal/"
+          {
+            echo "# MPL-2.0 source locations for Buddy $RELEASE_VERSION"
+            echo
+            echo "This build contains MPL-2.0 licensed crates. Their complete corresponding"
+            echo "source, at the exact versions listed below, is available from crates.io."
+            echo "Each crate archive also contains the MPL-2.0 text as LICENSE.txt."
+            echo
+            awk '$3 == "MPL-2.0" { printf "- %s %s: https://crates.io/api/v1/crates/%s/%s/download\n", $1, $2, $1, $2 }' NOTICE
+          } > "$stage/legal/MPL-SOURCE-LOCATIONS.md"
+
+          tar czf buddy-linux-x86_64.tar.gz \
+            -C target/release buddy \
+            -C "$stage" legal
       - uses: actions/upload-artifact@v4
         with:
           name: artifact-linux
@@ -231,4 +252,4 @@ jobs:
           set -euo pipefail
           mapfile -t files < <(find dist -type f)
           printf 'Uploading %d artifact file(s)\n' "${#files[@]}"
-          gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file .github/release-notes-template.md "${files[@]}"
+          gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes-file .github/release-notes-template.md "${files[@]}"

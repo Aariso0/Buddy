@@ -15,6 +15,17 @@ Verified locally on the final tree:
 
 A whole-branch review over `f994caf..5ba00d8` returned "ready to merge" with no Critical or Important findings. Two task reviews found defects that were fixed and re-reviewed before completion: a Windows post-rename directory-fsync false failure in session creation, and a Tauri configuration that declared no window.
 
+## Post-M0 review fixes
+
+A later review pass found ten still-valid findings, all fixed on `application` before integration:
+
+- Linux `.tar.gz` stages `NOTICE`, `LICENSE` and exact-version MPL source locations before upload; `gh release create` pins the tag with `--target "$GITHUB_SHA"`.
+- Tauri declares `beforeDevCommand` so `tauri dev` starts Vite on port 5173 with `strictPort`.
+- Session creation reserves its directory exclusively; reads and recovery reject a manifest id that differs from its directory id; manifest and settings writes use unique, exclusively created staging files with failure cleanup.
+- The foundation plan's icon command and `publish` dependency list, and this document's table escaping, were corrected.
+
+Verification after the fixes: `cargo fmt --all -- --check`, `cargo test --workspace` (17 tests passing), `pnpm --filter @buddy/desktop build`, workflow YAML/config JSON parse, a dry run of the legal staging script, and a live Vite start on port 5173 — all green.
+
 ## What shipped
 
 | Area | Result |
@@ -22,7 +33,7 @@ A whole-branch review over `f994caf..5ba00d8` returned "ready to merge" with no 
 | Workspace | Cargo workspace (`buddy-core`, `buddy-cli`, `buddy-desktop`) and pnpm workspace (`@buddy/desktop`); Apache-2.0 with root `NOTICE`. |
 | Session format v1 | Typed errors, UUID ids with traversal rejection, atomic temp → fsync → rename write, corrupt/truncated manifest handling, read/recover with `needs_repair`. |
 | Settings and support | `load_settings`/`save_settings` with typed errors and atomic writes; `SUPPORT_FLOORS` pinned to Windows 10, macOS 14.2 and PipeWire-only, with a regression test. |
-| CLI harness | `buddy-cli session new|show|recover` emitting the manifest or `{"needs_repair":…,"manifest":…}`, with a real-binary integration test. |
+| CLI harness | `buddy-cli session new\|show\|recover` emitting the manifest or `{"needs_repair":…,"manifest":…}`, with a real-binary integration test. |
 | Desktop shell | Tauri 2 window titled `Buddy` (960×640), a `support_matrix()` command, generated icon set, `core:default`-only capability, and a compiled-config window test. The visible UI is deliberately the M0 placeholder; capture arrives in M1. |
 | CI and releases | `.github/workflows/ci.yml` tests PRs into `main` and pushes to `main` on Linux, Windows and macOS; a push publishing only when `apps/desktop/package.json` is newer than the latest `v*` tag. Unsigned NSIS `.exe`, `.dmg`, AppImage, `.deb`, `.rpm` and `.tar.gz`; release notes carry all required OS and unsigned-build warnings. No signing steps or signing secrets. |
 
@@ -35,16 +46,20 @@ A whole-branch review over `f994caf..5ba00d8` returned "ready to merge" with no 
 - Real-capture soaks on Arch Linux and Windows arrive with M1 capture code and must become dependencies of the `publish` job. Until then, the first CI release run is the real validation of bundle globs; failed uploads fail loudly via `if-no-files-found: error`.
 - macOS real capture is UNVERIFIED and must stay documented that way in release notes.
 
+## Session identity and creation semantics (binding for M1)
+
+- **Create versus resume:** `create_session` reserves the session directory exclusively. An id that already exists returns `SessionError::AlreadyExists` and leaves the existing manifest and all other state untouched. Resuming an interrupted session is a separate path through `read_session`/`recover_session`; creation never silently adopts or overwrites an existing session.
+- **Session identity rule:** the `id` stored in `session.json` must equal the id of the directory holding it. `read_session` and `recover_session` both return `SessionError::IdMismatch` when they differ; a mismatch is never silently repaired. Any future auto-repair or rename behaviour must be specified and approved before M1 writes real chunks.
+- Non-canonical UUID spellings may still produce an opaque Windows error; decide canonicalisation semantics before M1 writes real chunks.
+
 ## Deferred, non-blocking
 
 - Test-file import suppression and untested `Finalizing`/`Complete` recovery mappings.
-- A reused session id currently overwrites `session.json`; the embedded id is not compared with the requested id; non-canonical UUID spellings may produce an opaque Windows error. Decide create-vs-resume and canonicalisation semantics before M1 writes real chunks.
-- The settings temp filename is fixed per path; a concurrent second writer would race. Safe with today's single writer; revisit when an M1 writer thread exists.
 - TypeScript strict flags are present but not enforced; add `tsc --noEmit` when real UI code lands.
 - The `sort -V` version comparison treats prerelease tags incorrectly; replace it with semver-aware comparison before publishing any `-rc` version.
 - Root `clean` script uses `require()` under a `type: module` package; `node -e` is CommonJS today but a future Node default could change that.
 
-The MPL-2.0 attribution needs its licence text and source-availability offer included in release artifacts; the root `NOTICE` records the obligation, but no bundler step copies it into artifacts yet.
+Resolved during review fixes: session directories are now reserved exclusively; manifest ids are checked against their directory id; both session and settings writes use unique, exclusively created staging files. The Linux `.tar.gz` now stages `NOTICE`, `LICENSE` and an exact-version MPL source-locations file before upload.
 
 ## Next milestone
 
