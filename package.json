@@ -1,0 +1,9 @@
+{
+  "name": "buddy",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "cargo test --workspace",
+    "clean": "cargo clean && pnpm -r exec node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  }
+}
