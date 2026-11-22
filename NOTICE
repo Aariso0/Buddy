@@ -782,3 +782,98 @@ Notes on Windows WASAPI dependency licenses:
      0.62.2 and windows-core 0.62.2, were already listed above.
    - No MPL-2.0 crate is introduced by this backend, so the exact-version
      source-locations generator in .github/workflows/ci.yml is unchanged.
+
+macOS audio backends (M1 S1)
+----------------------------
+
+Capability/license spike result: a viable native system-audio path exists on
+macOS 14.2+ and does NOT require a virtual loopback device. Two upstream paths
+were checked against Apple's own documentation:
+
+  1. ScreenCaptureKit audio. Apple's DocC data for
+     `SCStreamConfiguration.capturesAudio` states "A Boolean value that indicates
+     whether to capture audio", that streams do not capture audio by default,
+     and an availability floor of macOS 13.0. The Rust binding
+     `screencapturekit` is maintained by doom-fish
+     (https://github.com/doom-fish/screencapturekit-rs); crates.io API records
+     version 12.0.0 published 2026-11-21, checksum
+     b5f891b0db00740f80bf876cfb83ae67c1484924be9cbf9d1b4aee87b1511108, license
+     `MIT OR Apache-2.0`, rust-version 1.82. Its README documents system audio
+     capture from macOS 13.0+ but microphone capture only from macOS 15.0+,
+     which is above Buddy's committed macOS 14.2 floor, so this crate is NOT
+     adopted. It is recorded here as evidence that a virtual device is unneeded.
+
+  2. CoreAudio process taps. Apple's DocC metadata for
+     `AudioHardwareCreateProcessTap` records `introducedAt: 14.2` for macOS.
+     Apple's "Capturing system audio with Core Audio taps" sample
+     (developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps)
+     says "ensure that you're using macOS 14.2 or later", creates a tap with
+     `AudioHardwareCreateProcessTap` and reads it through a HAL aggregate device.
+     It requires the `NSAudioCaptureUsageDescription` Info.plist key and the
+     user's System Audio Recording permission, and explicitly needs no virtual
+     audio device. Apple's CoreAudio framework ships with macOS; there is no
+     third-party runtime licence to attribute for the framework itself.
+
+Chosen binding: the upstream `coreaudio` crate, pinned to exactly 0.6.2 in
+crates/buddy-capture/Cargo.toml with its `process-tap` feature. It is maintained
+by Keegan Wilgermein (https://github.com/Keegan-Wilgermein/coreaudio). Sources
+checked: the crates.io API record for `coreaudio` 0.6.2 (license `MIT`,
+checksum 44f8d03f64a1e3a4fc093b793351ee901bceb52ee82a139072a808c2d4fec4bb,
+published 2026-10-21), the docs.rs 0.6.2 page (MIT, edition 2024), the published
+crate source Cargo.toml, LICENSE and README (which document `ProcessTap`,
+`AppTapAggregateDevice`, `IOProc` and the macOS 14.2+ floor), and Apple's
+process-tap and ScreenCaptureKit documentation. The crate taps all CoreAudio
+processes for `TrackKind::System` and opens the default input device for
+`TrackKind::Mic`. Tapping needs the System Audio Recording TCC grant; without
+it the tap is created but delivers silence, so the desktop shell must add
+`NSAudioCaptureUsageDescription` before a real-capture attempt can succeed.
+
+The exact MIT text from coreaudio 0.6.2's LICENSE is reproduced here:
+
+    MIT License
+
+    Copyright (c) 2026 Keegan Wilgermein
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+The locked crates added by this binding are each attributed below; their exact
+SPDX identifiers were cross-checked against the published crate sources and,
+where reachable, the crates.io API. None is MPL-2.0, so the exact-version
+source-locations generator in .github/workflows/ci.yml is unchanged.
+
+   coreaudio 0.6.2                                  MIT
+   objc2-audio-toolbox 0.3.2                        Zlib OR Apache-2.0 OR MIT
+   objc2-core-audio 0.3.2                           Zlib OR Apache-2.0 OR MIT
+   objc2-core-audio-types 0.3.2                     Zlib OR Apache-2.0 OR MIT
+
+Notes on macOS dependency licenses:
+   - coreaudio 0.6.2 is MIT; keep the notice above with any macOS distribution
+     that includes it.
+   - The three objc2-* bindings are generated from Apple's CoreAudio headers by
+     the objc2 project and are all Zlib OR Apache-2.0 OR MIT; Buddy uses them
+     under MIT terms. Their dependencies core-foundation 0.10.1,
+     objc2 0.6.5, objc2-encode 4.1.0 and objc2-foundation 0.3.2 were already
+     listed above.
+   - A cross-target `cargo check --target x86_64-apple-darwin --all-targets`
+     with the official Rust 1.100.0 toolchain passes for this backend and its
+     contract tests. That checks types only: no macOS linking, no macOS test
+     execution and no real capture was possible on this Linux host. Real
+     capture therefore stays UNVERIFIED and the release-note statement
+     "Real screen and audio capture has not been verified on macOS" is kept
+     verbatim.

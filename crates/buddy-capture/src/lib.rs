@@ -8,6 +8,8 @@ pub mod engine;
 pub mod fake;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod ring;
 #[cfg(target_os = "windows")]
 pub mod windows;
