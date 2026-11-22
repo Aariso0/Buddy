@@ -23,6 +23,7 @@ A later review pass found ten still-valid findings, all fixed on `application` b
 - Tauri declares `beforeDevCommand` so `tauri dev` starts Vite on port 5173 with `strictPort`.
 - Session creation reserves its directory exclusively; reads and recovery reject a manifest id that differs from its directory id; manifest and settings writes use unique, exclusively created staging files with failure cleanup.
 - The foundation plan's icon command and `publish` dependency list, and this document's table escaping, were corrected.
+- macOS: `generate_context!()` is called only once, inside `app_context()`, so the macOS-only Info.plist embedding does not define `_EMBED_INFO_PLIST` twice in the desktop test build.
 
 Verification after the fixes: `cargo fmt --all -- --check`, `cargo test --workspace` (17 tests passing), `pnpm --filter @buddy/desktop build`, workflow YAML/config JSON parse, a dry run of the legal staging script, and a live Vite start on port 5173 — all green.
 

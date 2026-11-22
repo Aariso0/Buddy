@@ -5,10 +5,17 @@ fn support_matrix() -> SupportFloors {
     SUPPORT_FLOORS.clone()
 }
 
+// `generate_context!` embeds Info.plist on macOS. Keep it at one expansion
+// site: a second call in the test would define `_EMBED_INFO_PLIST` twice and
+// fail the macOS build.
+fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![support_matrix])
-        .run(tauri::generate_context!())
+        .run(app_context())
         .expect("error while running Buddy");
 }
 
@@ -26,7 +33,7 @@ mod tests {
 
     #[test]
     fn configured_main_window_has_expected_label_and_title() {
-        let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let context = app_context();
         let window = context
             .config()
             .app
