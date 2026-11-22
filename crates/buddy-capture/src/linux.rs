@@ -51,7 +51,9 @@ enum Command {
 #[derive(Clone)]
 struct StreamSpec {
     kind: TrackKind,
-    device_id: String,
+    // Checked against the registry at open; the worker reuses it so an
+    // explicit id can never silently turn into an un-targeted stream.
+    target: Option<u32>,
     ring: Arc<RingBuffer>,
     sample_rate: Arc<AtomicU32>,
     state: Arc<AtomicU8>,
@@ -77,14 +79,110 @@ fn backend_error(message: impl Into<String>) -> CaptureError {
     CaptureError::Backend(message.into())
 }
 
-fn parse_target(device_id: &str) -> Result<Option<u32>, CaptureError> {
+/// The typed error for a live source whose ring stayed empty for the whole
+/// wait. Prebuilt by `open` so `read` never allocates, even on this path.
+fn stalled_error() -> CaptureError {
+    CaptureError::Backend("PipeWire capture stalled: no samples before deadline".to_owned())
+}
+
+/// Query the live PipeWire registry for this kind's sink/source nodes. The
+/// `default` pseudo-device is added by `list_devices`, not here. `open` uses
+/// this same query to reject ids that do not name a real node.
+fn enumerate_nodes(kind: &TrackKind) -> Result<Vec<DeviceInfo>, CaptureError> {
+    pw::init();
+    let mainloop = pw::main_loop::MainLoopRc::new(None)
+        .map_err(|error| backend_error(format!("PipeWire main loop: {error}")))?;
+    let context = pw::context::ContextRc::new(&mainloop, None)
+        .map_err(|error| backend_error(format!("PipeWire context: {error}")))?;
+    let core = context
+        .connect_rc(None)
+        .map_err(|error| backend_error(format!("PipeWire core: {error}")))?;
+    let registry = core
+        .get_registry()
+        .map_err(|error| backend_error(format!("PipeWire registry: {error}")))?;
+
+    let found = Arc::new(Mutex::new(Vec::new()));
+    let listener_kind = kind.clone();
+    let done = Arc::new(AtomicBool::new(false));
+    let done_listener = {
+        let done = Arc::clone(&done);
+        core.add_listener_local()
+            .done(move |_, _| done.store(true, Ordering::Release))
+            .register()
+    };
+    let registry_listener = {
+        let found = Arc::clone(&found);
+        registry
+            .add_listener_local()
+            .global(move |global| {
+                if global.type_ != pw::types::ObjectType::Node {
+                    return;
+                }
+                let Some(props) = global.props else { return };
+                let class = props.get(*pw::keys::MEDIA_CLASS).unwrap_or("");
+                // Sinks own the monitor ports used for system capture;
+                // application playback streams (Stream/Output/Audio) do not.
+                let wanted = match &listener_kind {
+                    TrackKind::System => class.starts_with("Audio/Sink"),
+                    TrackKind::Mic => class.starts_with("Audio/Source"),
+                };
+                if !wanted {
+                    return;
+                }
+                let name = props
+                    .get(*pw::keys::NODE_DESCRIPTION)
+                    .or_else(|| props.get(*pw::keys::NODE_NAME))
+                    .unwrap_or("PipeWire audio node");
+                if let Ok(mut devices) = found.lock() {
+                    devices.push(DeviceInfo {
+                        id: encode_device_id(&listener_kind, &global.id.to_string()),
+                        name: name.to_owned(),
+                        kind: listener_kind.clone(),
+                    });
+                }
+            })
+            .register()
+    };
+
+    core.sync(0)
+        .map_err(|error| backend_error(format!("PipeWire registry sync: {error}")))?;
+    for _ in 0..200 {
+        if done.load(Ordering::Acquire) {
+            break;
+        }
+        mainloop
+            .loop_()
+            .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(10)));
+    }
+    drop(registry_listener);
+    drop(done_listener);
+
+    let mut nodes = Vec::new();
+    if let Ok(extra) = found.lock() {
+        nodes.extend(extra.iter().cloned());
+    }
+    Ok(nodes)
+}
+
+/// Parse an explicit device id and verify it against the same registry that
+/// `list_devices` reports. `default` is a pseudo-device and needs no entry;
+/// any other id must name a live sink/source node of `kind`, otherwise this
+/// is a typed error rather than a stream that never receives samples.
+fn validated_target(kind: &TrackKind, device_id: &str) -> Result<Option<u32>, CaptureError> {
     if device_id == DEFAULT_ID {
         return Ok(None);
     }
-    device_id
+    let id = device_id
         .parse::<u32>()
-        .map(Some)
-        .map_err(|_| backend_error(format!("unknown PipeWire device id: {device_id}")))
+        .map_err(|_| backend_error(format!("unknown PipeWire device id: {device_id}")))?;
+    let encoded = encode_device_id(kind, device_id);
+    if enumerate_nodes(kind)?.iter().any(|node| node.id == encoded) {
+        Ok(Some(id))
+    } else {
+        Err(backend_error(format!(
+            "unknown PipeWire device id: {device_id}"
+        )))
+    }
 }
 
 /// The `mic:` prefix is how device ids from `list_devices(Mic)` encode the
@@ -177,7 +275,8 @@ fn build_and_run(
         .connect_rc(None)
         .map_err(|error| backend_error(format!("PipeWire core: {error}")))?;
 
-    let target = parse_target(&spec.device_id)?;
+    // Already parsed and registry-checked at open; never re-guess it here.
+    let target = spec.target;
     let mut props = properties! {
         *pw::keys::MEDIA_TYPE => "Audio",
         *pw::keys::MEDIA_CATEGORY => "Capture",
@@ -305,6 +404,10 @@ pub struct PipeWireSource {
     worker: Option<JoinHandle<()>>,
     // Prebuilt so `read` can hand out a typed error without allocating.
     pending_error: Option<CaptureError>,
+    stalled_error: Option<CaptureError>,
+    // Production uses DATA_WAIT; the backend's own unit test shortens it to
+    // prove the deadline path without waiting two seconds.
+    data_wait: Duration,
 }
 
 impl PipeWireSource {
@@ -314,12 +417,15 @@ impl PipeWireSource {
         if device_id.is_empty() {
             return Err(backend_error("empty PipeWire device id"));
         }
+        // Reject a nonexistent explicit id before a stream is created: a
+        // successful open must never be an empty success for a dead target.
+        let target = validated_target(&kind, device_id)?;
         let ring = Arc::new(RingBuffer::new(RING_FRAMES, CHANNELS as usize));
         let sample_rate = Arc::new(AtomicU32::new(SAMPLE_RATE));
         let state = Arc::new(AtomicU8::new(LIVE));
         let spec = StreamSpec {
             kind: kind.clone(),
-            device_id: device_id.to_owned(),
+            target,
             ring: Arc::clone(&ring),
             sample_rate: Arc::clone(&sample_rate),
             state: Arc::clone(&state),
@@ -336,6 +442,8 @@ impl PipeWireSource {
             pending_error: Some(CaptureError::DeviceLost(
                 "PipeWire device was removed".to_owned(),
             )),
+            stalled_error: Some(stalled_error()),
+            data_wait: DATA_WAIT,
         })
     }
 
@@ -413,74 +521,7 @@ impl AudioSource for PipeWireSource {
     }
 
     fn list_devices(kind: TrackKind) -> Result<Vec<DeviceInfo>, CaptureError> {
-        pw::init();
-        let mainloop = pw::main_loop::MainLoopRc::new(None)
-            .map_err(|error| backend_error(format!("PipeWire main loop: {error}")))?;
-        let context = pw::context::ContextRc::new(&mainloop, None)
-            .map_err(|error| backend_error(format!("PipeWire context: {error}")))?;
-        let core = context
-            .connect_rc(None)
-            .map_err(|error| backend_error(format!("PipeWire core: {error}")))?;
-        let registry = core
-            .get_registry()
-            .map_err(|error| backend_error(format!("PipeWire registry: {error}")))?;
-
-        let found = Arc::new(Mutex::new(Vec::new()));
-        let listener_kind = kind.clone();
-        let done = Arc::new(AtomicBool::new(false));
-        let done_listener = {
-            let done = Arc::clone(&done);
-            core.add_listener_local()
-                .done(move |_, _| done.store(true, Ordering::Release))
-                .register()
-        };
-        let registry_listener = {
-            let found = Arc::clone(&found);
-            registry
-                .add_listener_local()
-                .global(move |global| {
-                    if global.type_ != pw::types::ObjectType::Node {
-                        return;
-                    }
-                    let Some(props) = global.props else { return };
-                    let class = props.get(*pw::keys::MEDIA_CLASS).unwrap_or("");
-                    // Sinks own the monitor ports used for system capture;
-                    // application playback streams (Stream/Output/Audio) do not.
-                    let wanted = match &listener_kind {
-                        TrackKind::System => class.starts_with("Audio/Sink"),
-                        TrackKind::Mic => class.starts_with("Audio/Source"),
-                    };
-                    if !wanted {
-                        return;
-                    }
-                    let name = props
-                        .get(*pw::keys::NODE_DESCRIPTION)
-                        .or_else(|| props.get(*pw::keys::NODE_NAME))
-                        .unwrap_or("PipeWire audio node");
-                    if let Ok(mut devices) = found.lock() {
-                        devices.push(DeviceInfo {
-                            id: encode_device_id(&listener_kind, &global.id.to_string()),
-                            name: name.to_owned(),
-                            kind: listener_kind.clone(),
-                        });
-                    }
-                })
-                .register()
-        };
-
-        core.sync(0)
-            .map_err(|error| backend_error(format!("PipeWire registry sync: {error}")))?;
-        for _ in 0..200 {
-            if done.load(Ordering::Acquire) {
-                break;
-            }
-            mainloop
-                .loop_()
-                .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(10)));
-        }
-        drop(registry_listener);
-        drop(done_listener);
-
+        let nodes = enumerate_nodes(&kind)?;
         let mut devices = vec![DeviceInfo {
             id: encode_device_id(&kind, DEFAULT_ID),
             name: match &kind {
@@ -489,9 +530,7 @@ impl AudioSource for PipeWireSource {
             },
             kind: kind.clone(),
         }];
-        if let Ok(extra) = found.lock() {
-            devices.extend(extra.iter().cloned());
-        }
+        devices.extend(nodes);
         Ok(devices)
     }
 
@@ -511,8 +550,10 @@ impl AudioSource for PipeWireSource {
         }
         // The engine reads as fast as it can and treats Ok(0) as exhaustion.
         // Yielding lets the producer catch up without a lock, allocation or
-        // blocking I/O; the deadline keeps a dead graph from hanging stop().
-        let deadline = Instant::now() + DATA_WAIT;
+        // blocking I/O. A live source must never report exhaustion: a stalled
+        // graph is a typed Backend error so the engine records a gap instead
+        // of silently ending the track.
+        let deadline = Instant::now() + self.data_wait;
         while Instant::now() < deadline {
             std::thread::yield_now();
             if self.state.load(Ordering::Acquire) != LIVE {
@@ -522,7 +563,7 @@ impl AudioSource for PipeWireSource {
                 return Ok(count);
             }
         }
-        Ok(0)
+        Err(self.stalled_error.take().unwrap_or_else(stalled_error))
     }
 
     fn pause(&mut self) -> Result<(), CaptureError> {
@@ -539,9 +580,13 @@ impl AudioSource for PipeWireSource {
         self.shutdown_worker()?;
         let mut scratch = [0.0f32; SAMPLE_BATCH];
         while self.ring.pop(&mut scratch).is_some() {}
+        // Re-check the remembered id against the live registry: a device that
+        // was removed must fail reconnect with a typed error, not re-arm a
+        // stale stream.
+        let target = validated_target(&self.kind, &self.device_id)?;
         let spec = StreamSpec {
             kind: self.kind.clone(),
-            device_id: self.device_id.clone(),
+            target,
             ring: Arc::clone(&self.ring),
             sample_rate: Arc::clone(&self.sample_rate),
             state: Arc::clone(&self.state),
@@ -550,6 +595,7 @@ impl AudioSource for PipeWireSource {
         self.pending_error = Some(CaptureError::DeviceLost(
             "PipeWire device was removed".to_owned(),
         ));
+        self.stalled_error = Some(stalled_error());
         match spawn_worker(spec) {
             Ok((commands, worker)) => {
                 self.commands = Some(commands);
@@ -601,5 +647,40 @@ mod tests {
         assert!(decode_device_id("mic:").is_err());
         assert_eq!(encode_device_id(&TrackKind::Mic, "42"), "mic:42");
         assert_eq!(encode_device_id(&TrackKind::System, "42"), "42");
+    }
+
+    #[test]
+    fn empty_ring_deadline_is_a_typed_error_not_exhaustion() {
+        // A live source with an empty ring and a short test-only deadline must
+        // fail as Backend, never report Ok(0) as end-of-stream.
+        let ring = Arc::new(RingBuffer::new(8, 2));
+        let mut source = PipeWireSource {
+            kind: TrackKind::System,
+            device_id: DEFAULT_ID.to_owned(),
+            ring: Arc::clone(&ring),
+            sample_rate: Arc::new(AtomicU32::new(SAMPLE_RATE)),
+            state: Arc::new(AtomicU8::new(LIVE)),
+            commands: None,
+            worker: None,
+            pending_error: Some(CaptureError::DeviceLost("unused".to_owned())),
+            stalled_error: Some(stalled_error()),
+            data_wait: Duration::from_millis(20),
+        };
+        let mut buffer = [0.0f32; 8];
+        let error = source
+            .read(&mut buffer)
+            .expect_err("empty live source must never report Ok(0)");
+        assert!(
+            matches!(error, CaptureError::Backend(_)),
+            "deadline must be typed Backend, got {error}"
+        );
+
+        // The same source still reads normally once the producer catches up.
+        ring.push(&[1.0, 2.0]).expect("ring has room");
+        let count = source
+            .read(&mut buffer)
+            .expect("samples must read normally after a transient stall");
+        assert_eq!(count, 2);
+        assert_eq!(&buffer[..2], &[1.0, 2.0]);
     }
 }

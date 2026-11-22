@@ -70,3 +70,40 @@ fn pipewire_reports_missing_pipewire_as_typed_error() {
         Err(error) => panic!("unexpected error: {error}"),
     }
 }
+
+#[test]
+fn pipewire_rejects_unknown_numeric_device_id() {
+    let devices = match PipeWireSource::list_devices(TrackKind::System) {
+        Ok(devices) => devices,
+        Err(error) => {
+            assert!(absent_runtime(&error), "unexpected error: {error}");
+            // Headless hosts still reject an explicit id as a typed error.
+            match PipeWireSource::open("999999") {
+                Ok(_) => panic!("unknown device id must not open"),
+                Err(error) => assert!(absent_runtime(&error), "unexpected error: {error}"),
+            }
+            return;
+        }
+    };
+
+    // Live daemon: an id absent from the registry must fail before a stream
+    // is created, rather than reporting success on a device that never links.
+    for id in ["999999", "mic:999999"] {
+        match PipeWireSource::open(id) {
+            Ok(_) => panic!("unknown device id {id} must not open"),
+            Err(CaptureError::Backend(_)) | Err(CaptureError::DeviceLost(_)) => {}
+            Err(error) => panic!("unexpected error for {id}: {error}"),
+        }
+    }
+
+    // A registry-backed id still opens and reports the right track.
+    let valid = devices
+        .iter()
+        .find(|device| device.id != "default")
+        .map(|device| device.id.clone())
+        .unwrap_or_else(|| "default".to_owned());
+    let mut source = PipeWireSource::open(&valid)
+        .unwrap_or_else(|error| panic!("valid id {valid} must open: {error}"));
+    assert_eq!(source.kind(), TrackKind::System);
+    source.close().expect("close must succeed");
+}
