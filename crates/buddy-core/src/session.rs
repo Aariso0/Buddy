@@ -74,7 +74,13 @@ fn session_dir(root: &Path, id: &str) -> Result<PathBuf, SessionError> {
             )
         });
 
-    if unsafe_id || Uuid::parse_str(id).is_err() {
+    // Uuid parses uppercase and hyphenless spellings, but the on-disk id must
+    // be exactly the canonical lowercase hyphenated form. Rejecting rather than
+    // normalizing keeps one directory per session with no hidden aliases.
+    let noncanonical = Uuid::parse_str(id)
+        .map(|parsed| parsed.to_string() != id)
+        .unwrap_or(true);
+    if unsafe_id || noncanonical {
         return Err(SessionError::InvalidSessionId(id.to_owned()));
     }
 
@@ -173,6 +179,21 @@ fn write_manifest(dir: &Path, manifest: &SessionManifest) -> Result<(), SessionE
     sync_dir(dir);
 
     Ok(())
+}
+
+/// Mark an existing session complete through the same atomic manifest write
+/// used at creation. Everything except `state` and `ended_at` is left intact.
+pub fn finalize_session(
+    root: &Path,
+    id: &str,
+    now: DateTime<Utc>,
+) -> Result<SessionManifest, SessionError> {
+    let dir = session_dir(root, id)?;
+    let mut manifest = read_session(root, id)?;
+    manifest.state = SessionState::Complete;
+    manifest.ended_at = Some(now);
+    write_manifest(&dir, &manifest)?;
+    Ok(manifest)
 }
 
 /// Read a session manifest. Malformed JSON and schema errors are typed errors,

@@ -121,6 +121,64 @@ fn stale_tmp_file_does_not_affect_read() {
 }
 
 #[test]
+fn noncanonical_uuid_is_typed_error() {
+    let root = tempfile::tempdir().unwrap();
+    // Use hex letters so to_uppercase() genuinely changes the spelling: the
+    // brief's digit-only id is unchanged by uppercasing.
+    for id in [
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+            .to_uppercase()
+            .as_str(),
+        "11111111111141118111111111111111",
+    ] {
+        assert!(
+            matches!(
+                create_session(root.path(), id, now()),
+                Err(SessionError::InvalidSessionId(_))
+            ),
+            "non-canonical id {id} must be rejected, not repaired"
+        );
+        assert!(matches!(
+            read_session(root.path(), id),
+            Err(SessionError::InvalidSessionId(_))
+        ));
+    }
+}
+
+#[test]
+fn empty_reserved_dir_is_not_adopted() {
+    let root = tempfile::tempdir().unwrap();
+    // A crash after reserving the directory but before renaming session.json
+    // leaves an empty directory behind. It is not a session to adopt or delete.
+    std::fs::create_dir_all(root.path().join(id())).unwrap();
+    assert!(matches!(
+        create_session(root.path(), id(), now()),
+        Err(SessionError::AlreadyExists(_))
+    ));
+    assert!(matches!(
+        read_session(root.path(), id()),
+        Err(SessionError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound
+    ));
+}
+
+#[test]
+fn finalize_session_marks_complete() {
+    let root = tempfile::tempdir().unwrap();
+    let created = create_session(root.path(), id(), now()).unwrap();
+    let ended = Utc.with_ymd_and_hms(2026, 11, 22, 11, 30, 0).unwrap();
+    let done = finalize_session(root.path(), id(), ended).unwrap();
+    assert!(matches!(done.state, SessionState::Complete));
+    assert_eq!(done.ended_at, Some(ended));
+    // Finalizing updates only the completion fields, never the session identity.
+    assert_eq!(done.id, created.id);
+    assert_eq!(done.format_version, created.format_version);
+    assert_eq!(done.started_at, created.started_at);
+    assert_eq!(done.preset, created.preset);
+    assert_eq!(read_session(root.path(), id()).unwrap(), done);
+    assert!(!recover_session(root.path(), id()).unwrap().needs_repair);
+}
+
+#[test]
 fn manifest_matches_shared_schema_fixture() {
     let root = tempfile::tempdir().unwrap();
     let manifest = create_session(root.path(), id(), now()).unwrap();

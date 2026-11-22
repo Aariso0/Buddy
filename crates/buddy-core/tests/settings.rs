@@ -65,6 +65,25 @@ fn failed_save_settings_removes_staging_file() {
 }
 
 #[test]
+fn ensure_data_dir_precedes_save_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        data_dir: root.path().join("data").join("nested"),
+        log_level: "info".into(),
+    };
+    let sessions_root = ensure_data_dir(&settings).unwrap();
+    assert_eq!(sessions_root, settings.data_dir.join("sessions"));
+    assert!(sessions_root.is_dir());
+    // A second pass over an already prepared data dir must be harmless.
+    assert_eq!(ensure_data_dir(&settings).unwrap(), sessions_root);
+    save_settings(&settings.data_dir.join("settings.json"), &settings).unwrap();
+    assert_eq!(
+        load_settings(&settings.data_dir.join("settings.json")).unwrap(),
+        settings
+    );
+}
+
+#[test]
 fn corrupt_settings_file_is_typed_error() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("settings.json");

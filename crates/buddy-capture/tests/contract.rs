@@ -2,7 +2,7 @@ use buddy_capture::chunks::*;
 use buddy_capture::engine::*;
 use buddy_capture::fake::FakeAudioSource;
 use buddy_capture::{AudioSource, CaptureError, DeviceInfo, TrackKind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -221,6 +221,17 @@ impl AudioSource for ControlledSource {
     }
 }
 
+const SESSION_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+/// Reserve a real session beneath `root` and return its full directory. The
+/// engine is constructed with this directory in the app too, so stop() always
+/// has a manifest to finalize.
+fn session_dir_under(root: &Path) -> PathBuf {
+    let sessions_root = root.join("sessions");
+    buddy_core::session::create_session(&sessions_root, SESSION_ID, chrono::Utc::now()).unwrap();
+    sessions_root.join(SESSION_ID)
+}
+
 fn wait_for(predicate: impl Fn() -> bool) {
     let start = Instant::now();
     while !predicate() {
@@ -232,10 +243,10 @@ fn wait_for(predicate: impl Fn() -> bool) {
     }
 }
 
-fn engine_with(system: Vec<f32>, mic: Vec<f32>, dir: &Path) -> CaptureEngine {
+fn engine_with(system: Vec<f32>, mic: Vec<f32>, session_dir: &Path) -> CaptureEngine {
     CaptureEngine::new(
-        "11111111-1111-4111-8111-111111111111",
-        dir,
+        SESSION_ID,
+        session_dir,
         buddy_core::clock::SessionClock::new(),
         Box::new(FakeAudioSource::from_samples(
             TrackKind::System,
@@ -250,10 +261,11 @@ fn engine_with(system: Vec<f32>, mic: Vec<f32>, dir: &Path) -> CaptureEngine {
 #[test]
 fn both_tracks_record_simultaneously() {
     let dir = tempfile::tempdir().unwrap();
-    let mut engine = engine_with(vec![0.5; 96_000], vec![0.25; 96_000], dir.path());
+    let session_dir = session_dir_under(dir.path());
+    let mut engine = engine_with(vec![0.5; 96_000], vec![0.25; 96_000], &session_dir);
     engine.start().unwrap();
     engine.stop().unwrap();
-    let kinds: Vec<_> = read_chunk_index(dir.path())
+    let kinds: Vec<_> = read_chunk_index(&session_dir)
         .unwrap()
         .into_iter()
         .map(|c| c.track)
@@ -265,10 +277,11 @@ fn both_tracks_record_simultaneously() {
 #[test]
 fn pause_resume_keeps_monotonic_timeline() {
     let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
     let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
     let mut engine = CaptureEngine::new(
-        "11111111-1111-4111-8111-111111111111",
-        dir.path(),
+        SESSION_ID,
+        &session_dir,
         buddy_core::clock::SessionClock::new(),
         Box::new(FakeAudioSource::from_samples(
             TrackKind::System,
@@ -288,7 +301,7 @@ fn pause_resume_keeps_monotonic_timeline() {
     engine.resume().unwrap();
     engine.stop().unwrap();
 
-    let gaps = read_gaps(dir.path()).unwrap();
+    let gaps = read_gaps(&session_dir).unwrap();
     let starts: Vec<u64> = gaps.iter().map(|g| g.start_ms).collect();
     assert!(
         !starts.is_empty(),
@@ -301,7 +314,7 @@ fn pause_resume_keeps_monotonic_timeline() {
         "a gap injected after resume must not be stamped before the pause boundary ({pause_boundary_ms}): {starts:?}"
     );
     assert!(starts.windows(2).all(|w| w[0] <= w[1]));
-    assert!(read_chunk_index(dir.path())
+    assert!(read_chunk_index(&session_dir)
         .unwrap()
         .iter()
         .all(|c| c.frames > 0));
@@ -310,11 +323,12 @@ fn pause_resume_keeps_monotonic_timeline() {
 #[test]
 fn device_loss_records_gap_and_reconnects() {
     let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
     let mut mic = FakeAudioSource::from_samples(TrackKind::Mic, 48_000, vec![0.25; 96_000]);
     mic.fail_next_read_with(CaptureError::DeviceLost("mic-1".into()));
     let mut engine = CaptureEngine::new(
-        "11111111-1111-4111-8111-111111111111",
-        dir.path(),
+        SESSION_ID,
+        &session_dir,
         buddy_core::clock::SessionClock::new(),
         Box::new(FakeAudioSource::from_samples(
             TrackKind::System,
@@ -326,14 +340,14 @@ fn device_loss_records_gap_and_reconnects() {
     );
     engine.start().unwrap();
     engine.stop().unwrap();
-    let gaps = read_gaps(dir.path()).unwrap();
+    let gaps = read_gaps(&session_dir).unwrap();
     assert_eq!(
         gaps.iter()
             .filter(|g| matches!(g.reason, GapReason::DeviceLoss))
             .count(),
         1
     );
-    assert!(read_chunk_index(dir.path())
+    assert!(read_chunk_index(&session_dir)
         .unwrap()
         .iter()
         .any(|c| c.track == TrackKind::Mic));
@@ -342,13 +356,14 @@ fn device_loss_records_gap_and_reconnects() {
 #[test]
 fn overrun_records_gap_and_keeps_capturing() {
     let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
     let config = CaptureConfig {
         ring_frames: 8,
         ..CaptureConfig::default()
     };
     let mut engine = CaptureEngine::new(
-        "11111111-1111-4111-8111-111111111111",
-        dir.path(),
+        SESSION_ID,
+        &session_dir,
         buddy_core::clock::SessionClock::new(),
         Box::new(FakeAudioSource::from_samples(
             TrackKind::System,
@@ -364,11 +379,11 @@ fn overrun_records_gap_and_keeps_capturing() {
     );
     engine.start().unwrap();
     engine.stop().unwrap();
-    assert!(read_gaps(dir.path())
+    assert!(read_gaps(&session_dir)
         .unwrap()
         .iter()
         .any(|g| matches!(g.reason, GapReason::Overrun)));
-    assert!(read_chunk_index(dir.path())
+    assert!(read_chunk_index(&session_dir)
         .unwrap()
         .iter()
         .all(|c| c.frames > 0));
@@ -377,6 +392,7 @@ fn overrun_records_gap_and_keeps_capturing() {
 #[test]
 fn writer_preserves_samples_across_chunk_boundaries() {
     let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
     // 20_000-value chunks do not align with the 16_384-value drain batch, so
     // the writer must carry the remainder of each batch into the next chunk.
     let config = CaptureConfig {
@@ -386,8 +402,8 @@ fn writer_preserves_samples_across_chunk_boundaries() {
     };
     let samples: Vec<f32> = (0..96_000).map(|i| i as f32).collect();
     let mut engine = CaptureEngine::new(
-        "11111111-1111-4111-8111-111111111111",
-        dir.path(),
+        SESSION_ID,
+        &session_dir,
         buddy_core::clock::SessionClock::new(),
         Box::new(FakeAudioSource::from_samples(
             TrackKind::System,
@@ -404,7 +420,7 @@ fn writer_preserves_samples_across_chunk_boundaries() {
     engine.start().unwrap();
     engine.stop().unwrap();
 
-    let chunks: Vec<_> = read_chunk_index(dir.path())
+    let chunks: Vec<_> = read_chunk_index(&session_dir)
         .unwrap()
         .into_iter()
         .filter(|c| c.track == TrackKind::System)
@@ -413,7 +429,7 @@ fn writer_preserves_samples_across_chunk_boundaries() {
     assert_eq!(total, samples.len());
     let mut restored = Vec::new();
     for chunk in &chunks {
-        restored.extend(read_chunk_samples(dir.path(), chunk).unwrap());
+        restored.extend(read_chunk_samples(&session_dir, chunk).unwrap());
     }
     assert_eq!(restored, samples);
 }
@@ -421,10 +437,11 @@ fn writer_preserves_samples_across_chunk_boundaries() {
 #[test]
 fn gap_events_keep_per_event_timestamps() {
     let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
     let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::from_millis(6));
     let mut engine = CaptureEngine::new(
-        "11111111-1111-4111-8111-111111111111",
-        dir.path(),
+        SESSION_ID,
+        &session_dir,
         buddy_core::clock::SessionClock::new(),
         Box::new(FakeAudioSource::from_samples(
             TrackKind::System,
@@ -443,7 +460,7 @@ fn gap_events_keep_per_event_timestamps() {
     }
     engine.stop().unwrap();
 
-    let losses: Vec<_> = read_gaps(dir.path())
+    let losses: Vec<_> = read_gaps(&session_dir)
         .unwrap()
         .into_iter()
         .filter(|gap| matches!(gap.reason, GapReason::DeviceLoss))
@@ -467,11 +484,12 @@ fn gap_events_keep_per_event_timestamps() {
 #[test]
 fn generic_read_error_surfaces_from_stop_and_records_gap() {
     let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
     let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
     handle.inject(CaptureError::Backend("mic decoder exploded".to_owned()));
     let mut engine = CaptureEngine::new(
-        "11111111-1111-4111-8111-111111111111",
-        dir.path(),
+        SESSION_ID,
+        &session_dir,
         buddy_core::clock::SessionClock::new(),
         Box::new(FakeAudioSource::from_samples(
             TrackKind::System,
@@ -491,7 +509,7 @@ fn generic_read_error_surfaces_from_stop_and_records_gap() {
         ),
         "a failed track must not be reported as clean success: {result:?}"
     );
-    let gaps = read_gaps(dir.path()).unwrap();
+    let gaps = read_gaps(&session_dir).unwrap();
     assert_eq!(
         gaps.iter()
             .filter(|gap| matches!(gap.reason, GapReason::DeviceLoss))
@@ -503,11 +521,12 @@ fn generic_read_error_surfaces_from_stop_and_records_gap() {
 #[test]
 fn device_loss_reconnects_source_and_keeps_reading() {
     let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
     let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
     handle.inject(CaptureError::DeviceLost("mic-1".into()));
     let mut engine = CaptureEngine::new(
-        "11111111-1111-4111-8111-111111111111",
-        dir.path(),
+        SESSION_ID,
+        &session_dir,
         buddy_core::clock::SessionClock::new(),
         Box::new(FakeAudioSource::from_samples(
             TrackKind::System,
@@ -528,17 +547,85 @@ fn device_loss_reconnects_source_and_keeps_reading() {
         handle.reads() > 1,
         "the reconnected source must keep reading"
     );
-    let gaps = read_gaps(dir.path()).unwrap();
+    let gaps = read_gaps(&session_dir).unwrap();
     assert_eq!(
         gaps.iter()
             .filter(|gap| matches!(gap.reason, GapReason::DeviceLoss))
             .count(),
         1
     );
-    assert!(read_chunk_index(dir.path())
+    assert!(read_chunk_index(&session_dir)
         .unwrap()
         .iter()
         .any(|chunk| chunk.track == TrackKind::Mic));
+}
+
+#[test]
+fn clean_stop_finalizes_the_real_session_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
+    let sessions_root = session_dir.parent().unwrap();
+    let mut engine = engine_with(vec![0.5; 9_600], vec![0.25; 9_600], &session_dir);
+
+    engine.start().unwrap();
+    engine.stop().unwrap();
+
+    // The manifest must be the one inside sessions/<id>, not a sibling of it.
+    assert!(session_dir.join("session.json").is_file());
+    let manifest = buddy_core::session::read_session(sessions_root, SESSION_ID).unwrap();
+    assert!(
+        matches!(manifest.state, buddy_core::session::SessionState::Complete),
+        "a clean stop must mark the session Complete: {manifest:?}"
+    );
+    assert!(manifest.ended_at.is_some());
+    assert!(
+        !buddy_core::session::recover_session(sessions_root, SESSION_ID)
+            .unwrap()
+            .needs_repair
+    );
+}
+
+#[test]
+fn failed_stop_does_not_finalize_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
+    let sessions_root = session_dir.parent().unwrap();
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
+    handle.inject(CaptureError::Backend("mic decoder exploded".to_owned()));
+    let mut engine = CaptureEngine::new(
+        SESSION_ID,
+        &session_dir,
+        buddy_core::clock::SessionClock::new(),
+        Box::new(FakeAudioSource::from_samples(
+            TrackKind::System,
+            48_000,
+            vec![0.5; 9_600],
+        )),
+        Box::new(mic),
+        CaptureConfig::default(),
+    );
+
+    engine.start().unwrap();
+    wait_for(|| handle.reads() >= 1);
+    let result = engine.stop();
+    assert!(
+        matches!(
+            &result,
+            Err(CaptureError::Backend(message)) if message.contains("mic decoder exploded")
+        ),
+        "the original typed reader error must survive finalization: {result:?}"
+    );
+
+    let recovery = buddy_core::session::recover_session(sessions_root, SESSION_ID).unwrap();
+    assert!(
+        matches!(
+            recovery.manifest.state,
+            buddy_core::session::SessionState::Recording
+        ),
+        "a failed stop must not mark the session Complete: {:?}",
+        recovery.manifest
+    );
+    assert!(recovery.needs_repair);
 }
 
 #[test]

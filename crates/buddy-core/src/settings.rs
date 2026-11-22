@@ -34,6 +34,15 @@ pub enum SettingsError {
     Io(#[from] std::io::Error),
 }
 
+/// Create the configured data directory and its `sessions` child, returning the
+/// sessions root. Call this before saving settings on first run; `create_dir_all`
+/// also creates missing ancestors and is a no-op when they already exist.
+pub fn ensure_data_dir(settings: &Settings) -> Result<PathBuf, SettingsError> {
+    let sessions_root = settings.data_dir.join("sessions");
+    fs::create_dir_all(&sessions_root)?;
+    Ok(sessions_root)
+}
+
 /// Load settings from `path`. A missing file means "first run" and yields the
 /// defaults; a file that exists but cannot be parsed is a typed error.
 pub fn load_settings(path: &Path) -> Result<Settings, SettingsError> {

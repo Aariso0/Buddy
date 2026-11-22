@@ -251,6 +251,7 @@ name = "buddy-capture"
 version = "0.1.0"
 dependencies = [
  "buddy-core",
+ "chrono",
  "serde",
  "serde_json",
  "tempfile",

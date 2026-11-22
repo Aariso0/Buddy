@@ -6,6 +6,8 @@ use crate::chunks::{append_gap, write_chunk, GapMarker, GapReason};
 use crate::ring::RingBuffer;
 use crate::{AudioSource, CaptureError, TrackKind};
 use buddy_core::clock::SessionClock;
+use buddy_core::session::finalize_session;
+use chrono::Utc;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -310,10 +312,22 @@ impl CaptureEngine {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        match writer_error {
-            Some(error) => Err(error),
-            None => Ok(()),
+        if let Some(error) = writer_error {
+            return Err(error);
         }
+
+        // Only a clean stop may complete the session. A failed track leaves the
+        // recording state in place so recovery still reports needs_repair.
+        // session_dir is the full sessions/<id> directory, so the finalizer
+        // needs its parent root and joins the id back on itself.
+        let root = self
+            .session_dir
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        finalize_session(root, &self.session_id, Utc::now())
+            .map_err(|err| CaptureError::Backend(format!("finalize session: {err}")))?;
+        Ok(())
     }
 
     /// Elapsed time on the session clock, in milliseconds. Shared by gap
