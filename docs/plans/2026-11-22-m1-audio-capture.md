@@ -24,8 +24,9 @@
 | 6 — macOS backend spike (S1), UNVERIFIED | complete | `7cdb496`, `65d09ef` | 3 Important findings fixed; re-review clean; macOS runtime UNVERIFIED |
 | 7 — Desktop control surface and visible state | complete | `909dc7e`, `f7c7edd` | 1 Critical + 1 Important fixed; re-review clean; macOS desktop compile UNVERIFIED |
 | 8 — Soak jobs, publish gating, legal recheck | complete | `7707035`, `d623566` | review Approved + hardening re-review clean; soaks not run locally |
+| Final whole-branch review | complete | `52bc8f7` | 1 Critical (desktop encoded mic id → `open_for`) fixed with RED/GREEN regression test; scoped re-review clean; 1 Minor parked; no open findings |
 
-All eight tasks are complete. Current branch head: `d623566`. Nothing has been pushed. The Windows endpoint decision was confirmed by the user: `soak-windows` targets the self-hosted `[self-hosted, windows, buddy-audio-soak]` runner with real endpoints; no virtual device is imposed on users. Windows compilation, contract tests and real loopback capture remain UNVERIFIED on this Linux host and are gated on the self-hosted soak. macOS linking, desktop compilation, test execution and real capture also remain UNVERIFIED; a clean Apple-target type-check is not a runtime pass. Soaks were correctly not run locally, so no soak pass is claimed. This section is updated after each task's review; the SDD ledger holds the per-finding detail.
+All eight tasks and the final whole-branch review are complete. Current branch head: `52bc8f7`. Nothing has been pushed. The Windows endpoint decision was confirmed by the user: `soak-windows` targets the self-hosted `[self-hosted, windows, buddy-audio-soak]` runner with real endpoints; no virtual device is imposed on users. Windows compilation, contract tests and real loopback capture remain UNVERIFIED on this Linux host and are gated on the self-hosted soak. macOS linking, desktop compilation, test execution and real capture also remain UNVERIFIED; a clean Apple-target type-check is not a runtime pass. Soaks were correctly not run locally, so no soak pass is claimed. This section is updated after each task's review; the SDD ledger holds the per-finding detail.
 
 ### Execution rulings made so far
 
@@ -47,17 +48,20 @@ These are implementation rulings under the binding spec, not scope changes. Each
 - The Windows soak endpoint decision was escalated to the user, who chose a self-hosted runner with real audio endpoints; `soak-windows` targets `[self-hosted, windows, buddy-audio-soak]`. No virtual-device requirement is imposed on users and no hosted-runner soak pass is faked. Both `soak-linux` and `soak-windows` are `publish.needs` dependencies, so a failed soak blocks release.
 - The ignored `crates/buddy-capture/tests/soak_real.rs` hard-fails without `BUDDY_AUDIO_SOAK=1` and, after hardening, asserts per-track coverage of at least 95% of 3600 s (3420 s), per-chunk length of at least 96 000 interleaved f32 values with at most one partial final chunk, zero gaps and a non-silent System track. The soaks were not run locally; no pass is claimed.
 
-### Deferred review findings for final review
+### Deferred review findings (triaged by the final whole-branch review)
 
-- Task 1: `NOTICE` first-party note still lists three crates, not four.
+The final reviewer triaged every deferred item below. All were judged benign, documented, typed or bounded — none changes correctness of the shipped path enough to block merge. The one load-bearing item the final review promoted from Minor to Critical (desktop encoded mic id reaching `open_for`) was fixed in `52bc8f7`; one new Minor (silent backend-ring full drops) was parked with a recorded cost. Original per-task deferred list retained for the record:
+
+- Task 1: `NOTICE` first-party note still lists three crates, not four — **resolved** in Task 8 (`NOTICE` now lists four including `buddy-capture`).
 - Task 2: second `start()` after `stop()` can leak a writer thread; blocking backend `read()` can hang `stop()`; unchecked WAV size conversions; malformed gap JSON uses `InvalidChunk`; `ChunkInfo.frames` counts interleaved values, not block-aligned frames; `both_tracks_record_simultaneously` checks presence only; `GapMarker` has no track field.
 - Task 3: `empty_reserved_dir_is_not_adopted` does not assert `recover_session` explicitly; failing-finalize error mapping has no dedicated test.
 - Task 4: format/channel negotiation not checked; `pending_error` reports `DeviceLost` after close/failed reconnect; connect-timeout worker can linger briefly; poisoned `Mutex` in `list_devices` degrades silently; live-runtime test does not assert `count > 0`.
 - Task 5: `shutdown_worker` swallows timeouts then unbounded `join()` can hang close/reconnect; error slots are consumed so repeat device-loss reads return `Backend("")`; `list_devices`/`spawn_worker` timeouts leave brief stray threads; public `open_for` permits inconsistent kind/id pairs; `reconnect` publishes LIVE before worker success and leaves a stale sample rate; full-ring pushes are dropped without an overflow signal.
 - Task 6: consumed error slots make repeat reads `Backend("")` and allocate on fallback; 500 ms `yield_now` spin; `CHANNELS = 2` without channel normalization for mono/multichannel mics; contract test accepts silent taps (`count > 0` only) and `BUDDY_AUDIO_SOAK=1` cannot catch silence; `list_devices` `Backend` error skips outside soak mode.
 - Task 7: system source not `close()`d on a failed start; discarded title/tray/emit results in the view sink; discarded hotkey/tray toggle errors; missing failed-stop/preset tests (the latter two now covered by the fix round's tests).
-- Task 1 deferred item resolved: `NOTICE` first-party note now correctly lists four workspace crates including `buddy-capture`.
 - Task 8: non-default endpoint assertion in `soak_real.rs` is stricter than the brief and could hard-fail a correctly configured real-endpoint-only runner; Linux/Windows toolchain drift (`pacman` Rust vs `dtolnay/rust-toolchain@stable`) could let compiler versions diverge.
+- Final review (parked Minor): all three backends silently drop samples when their internal worker→reader ring is full, with no `Overrun` gap marker (the engine ring's overrun *is* recorded). Systematic loss would break the soak's coverage/full-chunk assertions; cost if wrong: a brief burst under extreme load is not marked as a gap.
+- Final review (fixed Critical): the desktop passed the encoded `mic:default` id to the raw-id `open_for`, so the Mic track failed on every real backend; `PlatformSources::open` now uses the decoding trait `AudioSource::open` with a RED/GREEN regression test.
 
 ## Global Constraints
 
