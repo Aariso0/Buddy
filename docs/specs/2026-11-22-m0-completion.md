@@ -1,11 +1,11 @@
 # M0 Foundation — completion record
 
 Date: 2026-11-22. Branch: `application`. Merge base: `f994caf3509619b0de06622086a6f2e3a145d120`.
-Final commit: `5ba00d8 docs: record main-merge version-gated release trigger`.
+M0 final commit: `5ba00d8`. Later review-fix commits are listed in the Post-M0 review fixes section and in `git log`.
 
 ## Status
 
-M0 is complete. All six tasks in `docs/plans/2026-11-22-m0-foundation.md` are implemented, reviewed and green. The branch has **not** been pushed or merged; the user is handling integration and the pull request.
+M0 is complete. All six tasks in `docs/plans/2026-11-22-m0-foundation.md` are implemented, reviewed and green. The branch has **not** been merged into `main`; the user is handling integration and the pull request.
 
 Verified locally on the final tree:
 
@@ -19,7 +19,7 @@ A whole-branch review over `f994caf..5ba00d8` returned "ready to merge" with no 
 
 A later review pass found ten still-valid findings, all fixed on `application` before integration:
 
-- Linux `.tar.gz` stages `NOTICE`, `LICENSE` and exact-version MPL source locations before upload; `gh release create` pins the tag with `--target "$GITHUB_SHA"`.
+- Linux `.tar.gz` stages `NOTICE`, `LICENSE`, the MPL-2.0 text and exact-version source locations for both Rust crates and npm packages before upload; `gh release create` pins the tag with `--target "$GITHUB_SHA"`. A follow-up review corrected the license-file wording and added the npm source locations.
 - Tauri declares `beforeDevCommand` so `tauri dev` starts Vite on port 5173 with `strictPort`.
 - Session creation reserves its directory exclusively; reads and recovery reject a manifest id that differs from its directory id; manifest and settings writes use unique, exclusively created staging files with failure cleanup.
 - The foundation plan's icon command and `publish` dependency list, and this document's table escaping, were corrected.
@@ -51,6 +51,7 @@ Verification after the fixes: `cargo fmt --all -- --check`, `cargo test --worksp
 - **Create versus resume:** `create_session` reserves the session directory exclusively. An id that already exists returns `SessionError::AlreadyExists` and leaves the existing manifest and all other state untouched. Resuming an interrupted session is a separate path through `read_session`/`recover_session`; creation never silently adopts or overwrites an existing session.
 - **Session identity rule:** the `id` stored in `session.json` must equal the id of the directory holding it. `read_session` and `recover_session` both return `SessionError::IdMismatch` when they differ; a mismatch is never silently repaired. Any future auto-repair or rename behaviour must be specified and approved before M1 writes real chunks.
 - Non-canonical UUID spellings may still produce an opaque Windows error; decide canonicalisation semantics before M1 writes real chunks.
+- A crash between directory reservation and manifest rename leaves an empty session directory: creation then returns `AlreadyExists` while read/recover return `Io(NotFound)`. Delete that directory manually until M1 defines repair; no committed manifest is ever lost.
 
 ## Deferred, non-blocking
 

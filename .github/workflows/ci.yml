@@ -148,14 +148,42 @@ jobs:
           stage="$(mktemp -d)"
           mkdir -p "$stage/legal"
           cp NOTICE LICENSE "$stage/legal/"
+
+          # NOTICE requires the MPL text to accompany the distribution. It is
+          # already on disk at the exact version used by this build.
+          mpl_text="$(find "$HOME/.cargo/registry/src" -type f -path '*/cssparser-0.38.0/LICENSE' -print -quit)"
+          if [ -z "$mpl_text" ]; then
+            echo "MPL text for cssparser 0.38.0 is missing from the cargo registry" >&2
+            exit 1
+          fi
+          cp "$mpl_text" "$stage/legal/LICENSE-MPL-2.0.txt"
+
           {
             echo "# MPL-2.0 source locations for Buddy $RELEASE_VERSION"
             echo
-            echo "This build contains MPL-2.0 licensed crates. Their complete corresponding"
-            echo "source, at the exact versions listed below, is available from crates.io."
-            echo "Each crate archive also contains the MPL-2.0 text as LICENSE.txt."
+            echo "This build contains MPL-2.0 licensed crates and packages. Their complete"
+            echo "corresponding source, at the exact versions below, is available from the"
+            echo "registry named in each entry."
             echo
-            awk '$3 == "MPL-2.0" { printf "- %s %s: https://crates.io/api/v1/crates/%s/%s/download\n", $1, $2, $1, $2 }' NOTICE
+            awk '
+              $3 == "MPL-2.0" && $2 ~ /^[0-9]/ {
+                printf "- %s %s: https://crates.io/api/v1/crates/%s/%s/download\n", $1, $2, $1, $2
+                next
+              }
+              $2 == "MPL-2.0" && $1 ~ /@[0-9]/ {
+                spec = $1
+                match(spec, /^.*@/)
+                name = substr(spec, 1, RLENGTH - 1)
+                version = substr(spec, RLENGTH + 1)
+                printf "- %s: https://registry.npmjs.org/%s/-/%s-%s.tgz\n", spec, name, name, version
+              }
+            ' NOTICE
+            echo
+            echo "cssparser, cssparser-macros and dtoa-short ship the MPL-2.0 text as LICENSE"
+            echo "in their crate sources; option-ext ships it as LICENSE.txt. The selectors"
+            echo "crates ship no license file, so their upstream notice is kept at"
+            echo "https://github.com/servo/servo/blob/main/LICENSE. The MPL-2.0 text is"
+            echo "staged beside this file as LICENSE-MPL-2.0.txt."
           } > "$stage/legal/MPL-SOURCE-LOCATIONS.md"
 
           tar czf buddy-linux-x86_64.tar.gz \
