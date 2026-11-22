@@ -17,9 +17,10 @@ use crate::ring::RingBuffer;
 use crate::{AudioSource, CaptureError, DeviceInfo, TrackKind};
 use coreaudio::{
     AppTapAggregateDevice, AudioObject, CoreAudioError, ErrorKind, ProcessTap, Scope, System,
-    TapMute, DEVICE_NAME, DEVICE_NOMINAL_SAMPLE_RATE, DEVICE_UID, PROCESS_BUNDLE_ID,
+    TapMute, DEVICE_IS_ALIVE, DEVICE_NAME, DEVICE_NOMINAL_SAMPLE_RATE, DEVICE_UID,
+    PROCESS_BUNDLE_ID,
 };
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -59,14 +60,18 @@ struct StreamSpec {
     state: Arc<AtomicU8>,
 }
 
-/// A private tap and the aggregate that makes it readable. Both fields are
-/// held purely for their `Drop` side effects, and declaration order matters:
-/// the aggregate must be destroyed before the tap it reads.
+/// Two RAII handles whose destruction order is fixed by field declaration
+/// order: `first` is always dropped before `second`. A focused unit test pins
+/// that rule, since the fields themselves are only held for their `Drop`.
 #[allow(dead_code)]
-struct SystemTap {
-    tap: ProcessTap,
-    aggregate: AppTapAggregateDevice,
+struct OrderedDrop<A, B> {
+    first: A,
+    second: B,
 }
+
+/// The aggregate must be destroyed before the tap it reads, so it is declared
+/// first. The I/O proc is dropped before this whole value in the worker.
+type SystemTap = OrderedDrop<AppTapAggregateDevice, ProcessTap>;
 
 fn backend_error(message: impl Into<String>) -> CaptureError {
     CaptureError::Backend(message.into())
@@ -218,7 +223,13 @@ fn resolve_device(
             let aggregate = AppTapAggregateDevice::with_tap(name, &aggregate_uid, tap.uid())
                 .map_err(map_error)?;
             let device = aggregate.device();
-            Ok((device, Some(SystemTap { tap, aggregate })))
+            Ok((
+                device,
+                Some(SystemTap {
+                    first: aggregate,
+                    second: tap,
+                }),
+            ))
         }
     }
 }
@@ -227,13 +238,51 @@ fn is_device_loss(error: &CaptureError) -> bool {
     matches!(error, CaptureError::DeviceLost(_))
 }
 
+/// What a worker should do with one command-channel receive.
+enum PollOutcome {
+    Command(Command),
+    Continue,
+    Stop,
+}
+
+/// A disconnected channel means the source dropped its sender. Treating that
+/// as `Continue` would spin forever on an immediate `Disconnected` error.
+fn classify_poll(result: Result<Command, RecvTimeoutError>) -> PollOutcome {
+    match result {
+        Ok(command) => PollOutcome::Command(command),
+        Err(RecvTimeoutError::Timeout) => PollOutcome::Continue,
+        Err(RecvTimeoutError::Disconnected) => PollOutcome::Stop,
+    }
+}
+
+/// A liveness probe means device loss when CoreAudio says the device is no
+/// longer alive, or when its object vanished / the HAL stopped.
+fn device_lost_from_probe(probe: Result<bool, CoreAudioError>) -> bool {
+    match probe {
+        Ok(false) => true,
+        Ok(true) => false,
+        Err(error) => matches!(
+            error.kind(),
+            ErrorKind::BadDevice | ErrorKind::BadObject | ErrorKind::NotRunning
+        ),
+    }
+}
+
+/// A `DEVICE_IS_ALIVE` notification of `false` is authoritative; otherwise use
+/// the direct probe so a missed notification still becomes a typed loss.
+fn observed_device_loss(latest: Option<bool>, probe: Result<bool, CoreAudioError>) -> bool {
+    latest == Some(false) || device_lost_from_probe(probe)
+}
+
 fn run_worker(
     spec: StreamSpec,
     commands: Receiver<Command>,
     ready: Sender<Result<(), CaptureError>>,
+    done: Sender<()>,
+    shutdown: Arc<AtomicBool>,
 ) {
     let state = Arc::clone(&spec.state);
-    if let Err(error) = build_and_run(spec, commands, &ready) {
+    if let Err(error) = build_and_run(spec, commands, &ready, shutdown) {
         state.store(
             if is_device_loss(&error) {
                 DEVICE_LOST
@@ -244,12 +293,16 @@ fn run_worker(
         );
         let _ = ready.send(Err(error));
     }
+    // Last action: receiving this lets the owner turn a bounded wait into a
+    // join without risking an unbounded block on a wedged CoreAudio call.
+    let _ = done.send(());
 }
 
 fn build_and_run(
     spec: StreamSpec,
     commands: Receiver<Command>,
     ready: &Sender<Result<(), CaptureError>>,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<(), CaptureError> {
     let (device, tap) = resolve_device(&spec)?;
     let sample_rate = device
@@ -258,6 +311,11 @@ fn build_and_run(
         .unwrap_or(SAMPLE_RATE);
     spec.sample_rate
         .store(sample_rate.max(1), Ordering::Release);
+
+    // Upstream `coreaudio` 0.6.2 exposes DEVICE_IS_ALIVE as a listenable bool
+    // property that becomes false on a USB/Bluetooth unplug. The listener is
+    // best-effort; the direct probe in the loop is the bounded fallback.
+    let alive_listener = device.add_listener(DEVICE_IS_ALIVE).ok();
 
     let ring = Arc::clone(&spec.ring);
     let mut proc = device
@@ -273,46 +331,121 @@ fn build_and_run(
     let _ = ready.send(Ok(()));
 
     let result = 'stream: loop {
-        match commands.recv_timeout(Duration::from_millis(100)) {
-            Ok(Command::Pause(reply)) => {
+        if shutdown.load(Ordering::Acquire) {
+            break 'stream Ok(());
+        }
+        let notification = alive_listener
+            .as_ref()
+            .and_then(|listener| listener.latest());
+        if observed_device_loss(notification, device.get_property(DEVICE_IS_ALIVE)) {
+            break 'stream Err(CaptureError::DeviceLost(
+                "CoreAudio endpoint is no longer alive".to_owned(),
+            ));
+        }
+        match classify_poll(commands.recv_timeout(Duration::from_millis(100))) {
+            PollOutcome::Command(Command::Pause(reply)) => {
                 let result = proc.pause().map_err(map_error);
                 let _ = reply.send(result);
             }
-            Ok(Command::Resume(reply)) => {
+            PollOutcome::Command(Command::Resume(reply)) => {
                 let result = proc.play().map_err(map_error);
                 let _ = reply.send(result);
             }
-            Ok(Command::Shutdown(reply)) => {
+            PollOutcome::Command(Command::Shutdown(reply)) => {
                 let _ = reply.send(Ok(()));
                 break 'stream Ok(());
             }
-            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {}
+            PollOutcome::Continue => {}
+            PollOutcome::Stop => break 'stream Ok(()),
         }
     };
 
     let _ = proc.pause();
-    // Teardown order: I/O proc, aggregate device, tap.
+    // Teardown order: I/O proc, then the SystemTap (aggregate first, tap last).
     drop(proc);
     drop(tap);
     result
 }
 
-fn spawn_worker(spec: StreamSpec) -> Result<(Sender<Command>, JoinHandle<()>), CaptureError> {
+/// Owns the worker and the only command sender. Dropping it always asks the
+/// worker to stop, so a live tap cannot outlive its source.
+struct Worker {
+    commands: Option<Sender<Command>>,
+    done: Receiver<()>,
+    thread: Option<JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl Worker {
+    /// Idempotent: once the thread is taken there is nothing left to stop.
+    fn stop(&mut self) -> Result<(), CaptureError> {
+        if self.thread.is_none() {
+            self.commands = None;
+            return Ok(());
+        }
+        self.shutdown.store(true, Ordering::Release);
+        if let Some(commands) = self.commands.take() {
+            let (reply_tx, _reply_rx) = mpsc::channel();
+            let _ = commands.send(Command::Shutdown(reply_tx));
+        }
+        let stopped = match self.done.recv_timeout(COMMAND_TIMEOUT) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(backend_error("CoreAudio worker did not stop")),
+        };
+        if let Some(thread) = self.thread.take() {
+            // `done` is the worker's final action, so join cannot block once
+            // it has been received. Otherwise the thread is detached, but the
+            // shutdown flag and the dropped sender guarantee it exits.
+            if stopped.is_ok() {
+                let _ = thread.join();
+            }
+        }
+        stopped
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+fn spawn_worker(spec: StreamSpec) -> Result<Worker, CaptureError> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (commands, command_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let shutdown = Arc::new(AtomicBool::new(false));
     let worker = thread::Builder::new()
         .name("buddy-coreaudio".to_owned())
-        .spawn(move || run_worker(spec, command_rx, ready_tx))
+        .spawn({
+            let shutdown = Arc::clone(&shutdown);
+            let done_tx = done_tx.clone();
+            move || run_worker(spec, command_rx, ready_tx, done_tx, shutdown)
+        })
         .map_err(|error| backend_error(format!("start CoreAudio worker: {error}")))?;
 
-    match ready_rx.recv_timeout(COMMAND_TIMEOUT) {
-        Ok(Ok(())) => Ok((commands, worker)),
-        Ok(Err(error)) => {
-            let _ = worker.join();
+    let outcome = match ready_rx.recv_timeout(COMMAND_TIMEOUT) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(backend_error("CoreAudio worker did not connect")),
+    };
+    match outcome {
+        Ok(()) => Ok(Worker {
+            commands: Some(commands),
+            done: done_rx,
+            thread: Some(worker),
+            shutdown,
+        }),
+        Err(error) => {
+            // Never leave a detached worker that can spin: raise the flag and
+            // drop the sender (which the loop treats as a stop), then wait for
+            // its bounded done signal before giving up on the join.
+            shutdown.store(true, Ordering::Release);
+            drop(commands);
+            if done_rx.recv_timeout(COMMAND_TIMEOUT).is_ok() {
+                let _ = worker.join();
+            }
             Err(error)
-        }
-        Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
-            Err(backend_error("CoreAudio worker did not connect"))
         }
     }
 }
@@ -325,8 +458,7 @@ pub struct CoreAudioSource {
     ring: Arc<RingBuffer>,
     sample_rate: Arc<AtomicU32>,
     state: Arc<AtomicU8>,
-    commands: Option<Sender<Command>>,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<Worker>,
     // Prebuilt so failure paths in `read` do not allocate.
     device_lost_error: Option<CaptureError>,
     failure_error: Option<CaptureError>,
@@ -350,14 +482,13 @@ impl CoreAudioSource {
             sample_rate: Arc::clone(&sample_rate),
             state: Arc::clone(&state),
         };
-        let (commands, worker) = spawn_worker(spec)?;
+        let worker = spawn_worker(spec)?;
         Ok(Self {
             kind,
             device_id: device_id.to_owned(),
             ring,
             sample_rate,
             state,
-            commands: Some(commands),
             worker: Some(worker),
             device_lost_error: Some(CaptureError::DeviceLost(
                 "CoreAudio endpoint was removed".to_owned(),
@@ -374,8 +505,9 @@ impl CoreAudioSource {
         make: impl FnOnce(Sender<Result<(), CaptureError>>) -> Command,
     ) -> Result<(), CaptureError> {
         let commands = self
-            .commands
+            .worker
             .as_ref()
+            .and_then(|worker| worker.commands.as_ref())
             .ok_or_else(|| backend_error("CoreAudio source is closed"))?;
         let (reply_tx, reply_rx) = mpsc::channel();
         commands
@@ -389,14 +521,10 @@ impl CoreAudioSource {
     }
 
     fn shutdown_worker(&mut self) -> Result<(), CaptureError> {
-        let result = self.command(Command::Shutdown);
-        if let Some(worker) = self.worker.take() {
-            worker
-                .join()
-                .map_err(|_| backend_error("CoreAudio worker panicked"))?;
+        match self.worker.take() {
+            Some(mut worker) => worker.stop(),
+            None => Ok(()),
         }
-        self.commands = None;
-        result
     }
 
     fn failure(&mut self, lost: bool) -> CaptureError {
@@ -492,8 +620,7 @@ impl AudioSource for CoreAudioSource {
             "CoreAudio capture stalled: no samples before deadline",
         ));
         match spawn_worker(spec) {
-            Ok((commands, worker)) => {
-                self.commands = Some(commands);
+            Ok(worker) => {
                 self.worker = Some(worker);
                 Ok(())
             }
@@ -511,9 +638,116 @@ impl AudioSource for CoreAudioSource {
     }
 }
 
+impl Drop for CoreAudioSource {
+    fn drop(&mut self) {
+        // Idempotent with `close()`: a closed source has already taken its
+        // worker, so this is a no-op and cannot deadlock.
+        let _ = self.shutdown_worker();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    struct DropSpy<'a> {
+        label: &'static str,
+        log: &'a Mutex<Vec<&'static str>>,
+    }
+
+    impl Drop for DropSpy<'_> {
+        fn drop(&mut self) {
+            self.log.lock().unwrap().push(self.label);
+        }
+    }
+
+    /// Pins the field-declaration drop rule that `SystemTap` relies on:
+    /// the aggregate must go before the tap it reads.
+    #[test]
+    fn aggregate_drops_before_tap() {
+        let log = Mutex::new(Vec::new());
+        let handles = OrderedDrop {
+            first: DropSpy {
+                label: "aggregate",
+                log: &log,
+            },
+            second: DropSpy {
+                label: "tap",
+                log: &log,
+            },
+        };
+        drop(handles);
+        assert_eq!(log.into_inner().unwrap(), vec!["aggregate", "tap"]);
+    }
+
+    #[test]
+    fn disconnected_command_poll_stops_the_worker() {
+        let (tx, rx) = mpsc::channel::<Command>();
+        drop(tx);
+        assert!(matches!(
+            classify_poll(rx.recv_timeout(Duration::from_millis(10))),
+            PollOutcome::Stop
+        ));
+
+        let (_keep_alive, rx) = mpsc::channel::<Command>();
+        assert!(matches!(
+            classify_poll(rx.recv_timeout(Duration::from_millis(0))),
+            PollOutcome::Continue
+        ));
+
+        let (tx, rx) = mpsc::channel::<Command>();
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        tx.send(Command::Pause(reply_tx)).unwrap();
+        assert!(matches!(
+            classify_poll(rx.recv_timeout(Duration::from_millis(10))),
+            PollOutcome::Command(Command::Pause(_))
+        ));
+    }
+
+    #[test]
+    fn worker_stop_is_bounded_and_idempotent() {
+        let (commands, _command_rx) = mpsc::channel::<Command>();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&shutdown);
+        let thread = thread::spawn(move || {
+            while !flag.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+            let _ = done_tx.send(());
+        });
+        let mut worker = Worker {
+            commands: Some(commands),
+            done: done_rx,
+            thread: Some(thread),
+            shutdown,
+        };
+        assert!(worker.stop().is_ok());
+        assert!(worker.stop().is_ok());
+    }
+
+    #[test]
+    fn liveness_probes_become_typed_device_loss() {
+        const BAD_DEVICE: i32 = 0x2164_6576; // kAudioHardwareBadDeviceError
+        const BAD_OBJECT: i32 = 0x216f_626a; // kAudioHardwareBadObjectError
+        const NOT_RUNNING: i32 = 0x7374_6f70; // kAudioHardwareNotRunningError
+
+        assert!(!device_lost_from_probe(Ok(true)));
+        assert!(device_lost_from_probe(Ok(false)));
+        assert!(device_lost_from_probe(Err(CoreAudioError::from(
+            BAD_DEVICE
+        ))));
+        assert!(device_lost_from_probe(Err(CoreAudioError::from(
+            BAD_OBJECT
+        ))));
+        assert!(device_lost_from_probe(Err(CoreAudioError::from(
+            NOT_RUNNING
+        ))));
+        assert!(!device_lost_from_probe(Err(CoreAudioError::from(-1))));
+        assert!(observed_device_loss(Some(false), Ok(true)));
+        assert!(!observed_device_loss(Some(true), Ok(true)));
+    }
 
     #[test]
     fn device_ids_encode_the_track_without_a_separate_argument() {
