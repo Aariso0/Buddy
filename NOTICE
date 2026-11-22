@@ -229,6 +229,7 @@ were also checked against the crates.io API.
   gdkx11 0.18.2                                   MIT
   gdkx11-sys 0.18.2                               MIT
   generic-array 0.14.7                            MIT
+  gethostname 1.1.0                               Apache-2.0
   getrandom 0.3.4                                 MIT OR Apache-2.0
   gio 0.18.4                                      MIT
   gio-sys 0.18.1                                  MIT
@@ -236,6 +237,7 @@ were also checked against the crates.io API.
   glib-macros 0.18.5                              MIT
   glib-sys 0.18.1                                 MIT
   glob 0.3.4                                      MIT OR Apache-2.0
+  global-hotkey 0.8.0                             Apache-2.0 OR MIT
   gobject-sys 0.18.0                              MIT
   gtk 0.18.2                                      MIT
   gtk-sys 0.18.2                                  MIT
@@ -286,6 +288,7 @@ were also checked against the crates.io API.
   jni-sys-macros 0.4.1                            MIT OR Apache-2.0
   json-patch 4.2.0                                MIT/Apache-2.0
   jsonptr 0.7.1                                   MIT OR Apache-2.0
+  keyboard-types 0.7.0                            MIT OR Apache-2.0
   keyboard-types 0.8.3                            MIT OR Apache-2.0
   libappindicator 0.9.0                           Apache-2.0 OR MIT
   libappindicator-sys 0.9.0                       Apache-2.0 OR MIT
@@ -413,6 +416,8 @@ were also checked against the crates.io API.
   tauri-build 2.7.6                               Apache-2.0 OR MIT
   tauri-codegen 2.7.6                             Apache-2.0 OR MIT
   tauri-macros 2.7.6                              Apache-2.0 OR MIT
+  tauri-plugin 2.7.4                              Apache-2.0 OR MIT
+  tauri-plugin-global-shortcut 2.4.1              Apache-2.0 OR MIT
   tauri-runtime 2.12.4                            Apache-2.0 OR MIT
   tauri-runtime-wry 2.12.5                        Apache-2.0 OR MIT
   tauri-utils 2.10.4                              Apache-2.0 OR MIT
@@ -478,16 +483,26 @@ were also checked against the crates.io API.
   windows-future 0.3.2                            MIT OR Apache-2.0
   windows-numerics 0.3.1                          MIT OR Apache-2.0
   windows-sys 0.45.0                              MIT OR Apache-2.0
+  windows-sys 0.59.0                              MIT OR Apache-2.0
   windows-targets 0.42.2                          MIT OR Apache-2.0
+  windows-targets 0.52.6                          MIT OR Apache-2.0
   windows-threading 0.2.1                         MIT OR Apache-2.0
   windows-version 0.1.7                           MIT OR Apache-2.0
   windows_aarch64_gnullvm 0.42.2                  MIT OR Apache-2.0
+  windows_aarch64_gnullvm 0.52.6                  MIT OR Apache-2.0
   windows_aarch64_msvc 0.42.2                     MIT OR Apache-2.0
+  windows_aarch64_msvc 0.52.6                     MIT OR Apache-2.0
   windows_i686_gnu 0.42.2                         MIT OR Apache-2.0
+  windows_i686_gnu 0.52.6                         MIT OR Apache-2.0
+  windows_i686_gnullvm 0.52.6                     MIT OR Apache-2.0
   windows_i686_msvc 0.42.2                        MIT OR Apache-2.0
+  windows_i686_msvc 0.52.6                        MIT OR Apache-2.0
   windows_x86_64_gnu 0.42.2                       MIT OR Apache-2.0
+  windows_x86_64_gnu 0.52.6                       MIT OR Apache-2.0
   windows_x86_64_gnullvm 0.42.2                   MIT OR Apache-2.0
+  windows_x86_64_gnullvm 0.52.6                   MIT OR Apache-2.0
   windows_x86_64_msvc 0.42.2                      MIT OR Apache-2.0
+  windows_x86_64_msvc 0.52.6                      MIT OR Apache-2.0
   winnow 0.5.40                                   MIT
   winnow 1.0.5                                    MIT
   winreg 0.56.0                                   MIT
@@ -496,6 +511,9 @@ were also checked against the crates.io API.
   wry 0.57.3                                      Apache-2.0 OR MIT
   x11 2.21.0                                      MIT
   x11-dl 2.21.0                                   MIT
+  x11rb 0.13.2                                    MIT OR Apache-2.0
+  x11rb-protocol 0.13.2                           MIT OR Apache-2.0
+  xkeysym 0.2.1                                   MIT OR Apache-2.0 OR Zlib
   yoke 0.8.4                                      Unicode-3.0
   yoke-derive 0.8.4                               Unicode-3.0
   zerofrom 0.1.8                                  Unicode-3.0
@@ -877,3 +895,58 @@ Notes on macOS dependency licenses:
      capture therefore stays UNVERIFIED and the release-note statement
      "Real screen and audio capture has not been verified on macOS" is kept
      verbatim.
+
+Desktop control surface (M1 Task 7)
+-----------------------------------
+
+Tray control uses Tauri's built-in `tauri::tray::TrayIconBuilder`, enabled by the
+`tray-icon` feature on the already-attributed `tauri` 2.12.7. No tray plugin was
+adopted: `tauri-plugin-tray` returns HTTP 404 from crates.io. The `tray-icon`
+0.25.1 crate it enables is already listed above; no new dependency is needed.
+
+The global start/stop hotkey uses the official `tauri-plugin-global-shortcut`,
+pinned to exactly 2.4.1 in apps/desktop/src-tauri/Cargo.toml. Spike evidence
+checked before adoption:
+
+  - crates.io API https://crates.io/api/v1/crates/tauri-plugin-global-shortcut/2.4.1:
+    license `Apache-2.0 OR MIT`, checksum
+    93ff17919fe09852d269bd37b1d3d2e993b9dbb514afe7acbf3346c1d3627e2d,
+    published 2026-10-10T16:54:51.613172Z, rust-version 1.90, not yanked.
+  - The exact published source archive was downloaded and read: `LICENSE.spdx`,
+    `LICENSE_APACHE-2.0`, `LICENSE_MIT`, `README.md`, `src/lib.rs` and
+    `permissions/default.toml` (which grants no permissions). Rust source files
+    carry both SPDX headers `Apache-2.0` and `MIT`.
+  - Repository https://github.com/tauri-apps/plugins-workspace showed commits on
+    2026-11-20, so the plugin is maintained. Its `global-hotkey` dependency's
+    repository showed activity on 2026-11-09.
+  - The plugin registers OS-level shortcuts through `global-hotkey`; it performs
+    no network access and sends no telemetry. Its behaviour is entirely local.
+  - The Rust-only `Builder::new().with_shortcut(...).with_handler(...)` API was
+    used, so no npm `@tauri-apps/plugin-global-shortcut` binding was added.
+
+Exact versions and SPDX identifiers of the newly locked crates, each taken from
+its crates.io API record and cross-checked against the published crate source:
+
+    tauri-plugin-global-shortcut 2.4.1              Apache-2.0 OR MIT
+    tauri-plugin 2.7.4                             Apache-2.0 OR MIT
+    global-hotkey 0.8.0                            Apache-2.0 OR MIT
+    keyboard-types 0.7.0                           MIT OR Apache-2.0
+    gethostname 1.1.0                              Apache-2.0
+    x11rb 0.13.2                                   MIT OR Apache-2.0
+    x11rb-protocol 0.13.2                          MIT OR Apache-2.0
+    xkeysym 0.2.1                                  MIT OR Apache-2.0 OR Zlib
+    windows-sys 0.59.0                             MIT OR Apache-2.0
+    windows-targets 0.52.6                         MIT OR Apache-2.0
+    windows_* 0.52.6 (all ten target crates)       MIT OR Apache-2.0
+
+The second `keyboard-types 0.7.0` is required by `global-hotkey`; `keyboard-types`
+0.8.3 remains in use by `tauri`. The `windows-*` 0.52.6 family is pulled in only
+by `global-hotkey`'s Windows target dependency; the existing 0.42.2 family is
+unchanged. None of the new crates is MPL-2.0, so the exact-version
+source-locations generator in .github/workflows/ci.yml is unchanged.
+
+macOS capture permission: `apps/desktop/src-tauri/Info.plist` supplies
+`NSAudioCaptureUsageDescription`, referenced explicitly by
+`bundle.macOS.infoPlist` in tauri.conf.json. Tauri also discovers that file by
+name. This satisfies the CoreAudio process-tap TCC requirement recorded above;
+it does not change the UNVERIFIED status of real macOS capture.

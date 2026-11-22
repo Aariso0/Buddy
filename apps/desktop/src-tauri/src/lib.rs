@@ -1,8 +1,446 @@
-use buddy_core::support::{SupportFloors, SUPPORT_FLOORS};
+use buddy_capture::{
+    engine::{CaptureConfig, CaptureEngine},
+    AudioSource, DeviceInfo, TrackKind,
+};
+use buddy_core::{
+    clock::SessionClock,
+    session::{create_session, Preset},
+    settings::{ensure_data_dir, Settings},
+    support::{SupportFloors, SUPPORT_FLOORS},
+};
+use chrono::Utc;
+use serde::Serialize;
+use std::{
+    fs,
+    sync::{Arc, Mutex},
+};
+use tauri::{Emitter, Manager};
+use tauri_plugin_global_shortcut::{Builder as ShortcutBuilder, ShortcutState};
+use uuid::Uuid;
+
+const HOTKEY_START_STOP: &str = "CommandOrControl+Shift+R";
+const TRAY_ID: &str = "buddy-tray";
+const TRAY_TOGGLE_ID: &str = "tray-toggle-recording";
+const TRAY_QUIT_ID: &str = "tray-quit";
+const SYSTEM_DEVICE_ID: &str = "default";
+const MIC_DEVICE_ID: &str = "mic:default";
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ViewPhase {
+    Idle,
+    Recording,
+    Paused,
+}
+
+/// The single serializable snapshot the HUD, window title and tray all render.
+#[derive(Debug, Clone, Serialize)]
+struct RecordingView {
+    phase: ViewPhase,
+    session_id: Option<String>,
+    title: String,
+    hud: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Recording,
+    Paused,
+}
+
+struct ActiveRecording {
+    id: String,
+    preset: Preset,
+    engine: CaptureEngine,
+    phase: Phase,
+}
+
+fn preset_label(preset: &Preset) -> &'static str {
+    match preset {
+        Preset::Lecture => "lecture",
+        Preset::Meeting => "meeting",
+    }
+}
+
+fn view_for(active: Option<&ActiveRecording>) -> RecordingView {
+    let Some(active) = active else {
+        return RecordingView {
+            phase: ViewPhase::Idle,
+            session_id: None,
+            title: "Buddy".to_owned(),
+            hud: "system: idle · mic: idle · hotkey: Ctrl+Shift+R".to_owned(),
+        };
+    };
+
+    let (phase, label, status) = match active.phase {
+        Phase::Recording => (ViewPhase::Recording, "REC", "recording"),
+        Phase::Paused => (ViewPhase::Paused, "PAUSED", "paused"),
+    };
+    let seconds = active.engine.elapsed_ms() / 1000;
+    RecordingView {
+        phase,
+        session_id: Some(active.id.clone()),
+        title: format!("Buddy — {label}"),
+        hud: format!(
+            "{label} · system: {status} · mic: {status} · preset: {} · {seconds}s",
+            preset_label(&active.preset)
+        ),
+    }
+}
+
+/// Test seam for window-title, tray and event publication.
+trait ViewSink: Send + Sync {
+    fn publish(&self, view: &RecordingView);
+}
+
+struct TauriViewSink {
+    app: tauri::AppHandle,
+}
+
+impl ViewSink for TauriViewSink {
+    fn publish(&self, view: &RecordingView) {
+        if let Some(window) = self.app.get_webview_window("main") {
+            let _ = window.set_title(&view.title);
+        }
+        if let Some(tray) = self.app.tray_by_id(TRAY_ID) {
+            let _ = tray.set_title(Some(&view.title));
+        }
+        let _ = self.app.emit("recording-state", view.clone());
+    }
+}
+
+/// Test seam for platform audio devices. The production implementation uses
+/// the already-licensed per-OS backends; tests use the capture fake.
+trait SourceFactory: Send + Sync {
+    fn list_devices(&self, kind: &TrackKind) -> Result<Vec<DeviceInfo>, String>;
+    fn open(&self, kind: TrackKind, device_id: &str) -> Result<Box<dyn AudioSource>, String>;
+}
+
+struct PlatformSources;
+
+impl SourceFactory for PlatformSources {
+    fn list_devices(&self, kind: &TrackKind) -> Result<Vec<DeviceInfo>, String> {
+        #[cfg(target_os = "linux")]
+        {
+            buddy_capture::linux::PipeWireSource::list_devices(kind.clone())
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            buddy_capture::macos::CoreAudioSource::list_devices(kind.clone())
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(target_os = "windows")]
+        {
+            buddy_capture::windows::WasapiSource::list_devices(kind.clone())
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            Err(format!(
+                "unsupported audio capture platform: {}",
+                std::env::consts::OS
+            ))
+        }
+    }
+
+    fn open(&self, kind: TrackKind, device_id: &str) -> Result<Box<dyn AudioSource>, String> {
+        #[cfg(target_os = "linux")]
+        {
+            let source = buddy_capture::linux::PipeWireSource::open_for(kind, device_id)
+                .map_err(|error| error.to_string())?;
+            Ok(Box::new(source))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let source = buddy_capture::macos::CoreAudioSource::open_for(kind, device_id)
+                .map_err(|error| error.to_string())?;
+            Ok(Box::new(source))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let source = buddy_capture::windows::WasapiSource::open_for(kind, device_id)
+                .map_err(|error| error.to_string())?;
+            Ok(Box::new(source))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            Err(format!(
+                "unsupported audio capture platform: {}",
+                std::env::consts::OS
+            ))
+        }
+    }
+}
+
+#[derive(Default)]
+struct Slot {
+    // `busy` is a cheap guard so start/stop blocking work never runs while the
+    // mutex is held. The engine itself remains owned by this one slot.
+    active: Option<ActiveRecording>,
+    busy: bool,
+}
+
+struct RecordingController {
+    settings: Settings,
+    factory: Box<dyn SourceFactory>,
+    sink: Arc<dyn ViewSink>,
+    slot: Mutex<Slot>,
+    view: Mutex<RecordingView>,
+}
+
+impl RecordingController {
+    fn new(settings: Settings, factory: Box<dyn SourceFactory>, sink: Arc<dyn ViewSink>) -> Self {
+        let controller = Self {
+            settings,
+            factory,
+            sink,
+            slot: Mutex::new(Slot::default()),
+            view: Mutex::new(view_for(None)),
+        };
+        let view = controller.view();
+        controller.publish(view);
+        controller
+    }
+
+    fn lock_slot(&self) -> std::sync::MutexGuard<'_, Slot> {
+        self.slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn view(&self) -> RecordingView {
+        self.view
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn publish(&self, view: RecordingView) {
+        *self
+            .view
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = view.clone();
+        self.sink.publish(&view);
+    }
+
+    fn list_devices(&self, kind: &TrackKind) -> Result<Vec<DeviceInfo>, String> {
+        self.factory.list_devices(kind)
+    }
+
+    fn begin_operation(&self) -> Result<(), String> {
+        let mut slot = self.lock_slot();
+        if slot.busy {
+            return Err("another recording operation is in progress".to_owned());
+        }
+        slot.busy = true;
+        Ok(())
+    }
+
+    fn start_inner(&self, preset: Preset) -> Result<(ActiveRecording, RecordingView), String> {
+        // First-run bootstrap: the session write below must never race the
+        // directory creation, so this happens before create_session.
+        let sessions_root = ensure_data_dir(&self.settings).map_err(|error| error.to_string())?;
+        let id = Uuid::new_v4().to_string();
+        let mut session_created = false;
+
+        let outcome = (|| -> Result<(ActiveRecording, RecordingView), String> {
+            create_session(&sessions_root, &id, Utc::now()).map_err(|error| error.to_string())?;
+            session_created = true;
+
+            let system = self.factory.open(TrackKind::System, SYSTEM_DEVICE_ID)?;
+            let mic = self.factory.open(TrackKind::Mic, MIC_DEVICE_ID)?;
+            let mut engine = CaptureEngine::new(
+                &id,
+                &sessions_root.join(&id),
+                SessionClock::new(),
+                system,
+                mic,
+                CaptureConfig::default(),
+            );
+            engine.start().map_err(|error| error.to_string())?;
+
+            let active = ActiveRecording {
+                id: id.clone(),
+                preset,
+                engine,
+                phase: Phase::Recording,
+            };
+            let view = view_for(Some(&active));
+            Ok((active, view))
+        })();
+
+        if outcome.is_err() && session_created {
+            // A failed open/start must not leave a session stuck in recording
+            // state. The typed error is still returned to the caller.
+            let _ = fs::remove_dir_all(sessions_root.join(&id));
+        }
+        outcome
+    }
+
+    fn start(&self, preset: Preset) -> Result<String, String> {
+        {
+            let slot = self.lock_slot();
+            if slot.active.is_some() {
+                return Err("a recording is already running; stop it first".to_owned());
+            }
+        }
+        self.begin_operation()?;
+
+        let outcome = self.start_inner(preset);
+        let mut slot = self.lock_slot();
+        slot.busy = false;
+        match outcome {
+            Ok((active, view)) => {
+                let id = active.id.clone();
+                slot.active = Some(active);
+                drop(slot);
+                self.publish(view);
+                Ok(id)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn pause(&self, id: &str) -> Result<(), String> {
+        let view = {
+            let mut slot = self.lock_slot();
+            if slot.busy {
+                return Err("another recording operation is in progress".to_owned());
+            }
+            let active = slot
+                .active
+                .as_mut()
+                .ok_or_else(|| "no active recording to pause".to_owned())?;
+            if active.id != id {
+                return Err(format!("unknown recording id: {id}"));
+            }
+            active.engine.pause().map_err(|error| error.to_string())?;
+            active.phase = Phase::Paused;
+            view_for(Some(active))
+        };
+        self.publish(view);
+        Ok(())
+    }
+
+    fn resume(&self, id: &str) -> Result<(), String> {
+        let view = {
+            let mut slot = self.lock_slot();
+            if slot.busy {
+                return Err("another recording operation is in progress".to_owned());
+            }
+            let active = slot
+                .active
+                .as_mut()
+                .ok_or_else(|| "no active recording to resume".to_owned())?;
+            if active.id != id {
+                return Err(format!("unknown recording id: {id}"));
+            }
+            active.engine.resume().map_err(|error| error.to_string())?;
+            active.phase = Phase::Recording;
+            view_for(Some(active))
+        };
+        self.publish(view);
+        Ok(())
+    }
+
+    fn stop(&self, id: &str) -> Result<(), String> {
+        let mut active = {
+            let mut slot = self.lock_slot();
+            if slot.busy {
+                return Err("another recording operation is in progress".to_owned());
+            }
+            if slot.active.as_ref().map(|active| active.id.as_str()) != Some(id) {
+                return Err(format!("unknown recording id: {id}"));
+            }
+            slot.busy = true;
+            match slot.active.take() {
+                Some(active) => active,
+                None => {
+                    slot.busy = false;
+                    return Err(format!("unknown recording id: {id}"));
+                }
+            }
+        };
+
+        // Joining the readers and writer is blocking; the mutex is released.
+        let result = active.engine.stop().map_err(|error| error.to_string());
+        let mut next_view = view_for(Some(&active));
+        if let Err(ref error) = result {
+            next_view.hud = format!("{} · stop failed: {error}", next_view.hud);
+        } else {
+            next_view = view_for(None);
+        }
+
+        {
+            let mut slot = self.lock_slot();
+            slot.busy = false;
+            if result.is_err() {
+                // Keep the session visible so the failure can be retried or
+                // recovered; never report a clean idle state after an error.
+                slot.active = Some(active);
+            }
+        }
+        self.publish(next_view);
+        result
+    }
+
+    fn toggle(&self) -> Result<(), String> {
+        let current = {
+            let slot = self.lock_slot();
+            slot.active
+                .as_ref()
+                .map(|active| (active.id.clone(), active.phase))
+        };
+        match current {
+            Some((id, _)) => self.stop(&id),
+            None => self.start(Preset::Lecture).map(|_| ()),
+        }
+    }
+}
+
+struct AppState {
+    controller: RecordingController,
+    // Holding the tray keeps it alive for the whole process.
+    _tray: tauri::tray::TrayIcon,
+}
 
 #[tauri::command]
 fn support_matrix() -> SupportFloors {
     SUPPORT_FLOORS.clone()
+}
+
+#[tauri::command]
+fn recording_state(state: tauri::State<'_, AppState>) -> RecordingView {
+    state.controller.view()
+}
+
+#[tauri::command]
+fn list_audio_devices(
+    kind: TrackKind,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<DeviceInfo>, String> {
+    state.controller.list_devices(&kind)
+}
+
+#[tauri::command]
+fn start_recording(preset: Preset, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    state.controller.start(preset)
+}
+
+#[tauri::command]
+fn pause_recording(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.controller.pause(&id)
+}
+
+#[tauri::command]
+fn resume_recording(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.controller.resume(&id)
+}
+
+#[tauri::command]
+fn stop_recording(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.controller.stop(&id)
 }
 
 // `generate_context!` embeds Info.plist on macOS. Keep it at one expansion
@@ -14,7 +452,75 @@ fn app_context() -> tauri::Context<tauri::Wry> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![support_matrix])
+        .invoke_handler(tauri::generate_handler![
+            support_matrix,
+            recording_state,
+            list_audio_devices,
+            start_recording,
+            pause_recording,
+            resume_recording,
+            stop_recording,
+        ])
+        .setup(|app| {
+            use tauri::menu::{Menu, MenuItem};
+            use tauri::tray::TrayIconBuilder;
+
+            let start_stop = MenuItem::with_id(
+                app,
+                TRAY_TOGGLE_ID,
+                "Start / Stop recording",
+                true,
+                None::<&str>,
+            )?;
+            let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit Buddy", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&start_stop, &quit])?;
+            let icon = app.default_window_icon().cloned().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "the configured default window icon is required for the tray",
+                )
+            })?;
+            let tray = TrayIconBuilder::with_id(TRAY_ID)
+                .icon(icon)
+                .menu(&menu)
+                .title("Buddy")
+                .tooltip("Buddy")
+                .on_menu_event(|app, event| {
+                    let id = event.id().as_ref();
+                    if id == TRAY_TOGGLE_ID {
+                        if let Some(state) = app.try_state::<AppState>() {
+                            let _ = state.controller.toggle();
+                        }
+                    } else if id == TRAY_QUIT_ID {
+                        app.exit(0);
+                    }
+                })
+                .build(app)?;
+
+            let sink = Arc::new(TauriViewSink {
+                app: app.handle().clone(),
+            });
+            let controller =
+                RecordingController::new(Settings::default(), Box::new(PlatformSources), sink);
+            app.manage(AppState {
+                controller,
+                _tray: tray,
+            });
+
+            app.handle().plugin(
+                ShortcutBuilder::new()
+                    .with_shortcut(HOTKEY_START_STOP)?
+                    .with_handler(|app, _shortcut, event| {
+                        if event.state == ShortcutState::Pressed {
+                            if let Some(state) = app.try_state::<AppState>() {
+                                let _ = state.controller.toggle();
+                            }
+                        }
+                    })
+                    .build(),
+            )?;
+            Ok(())
+        })
         .run(app_context())
         .expect("error while running Buddy");
 }
@@ -22,6 +528,160 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buddy_capture::{AudioSource, DeviceInfo, TrackKind};
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    struct FakeSourceFactory;
+
+    impl SourceFactory for FakeSourceFactory {
+        fn list_devices(&self, kind: &TrackKind) -> Result<Vec<DeviceInfo>, String> {
+            buddy_capture::fake::FakeAudioSource::list_devices(kind.clone())
+                .map_err(|error| error.to_string())
+        }
+
+        fn open(&self, kind: TrackKind, _device_id: &str) -> Result<Box<dyn AudioSource>, String> {
+            Ok(Box::new(
+                buddy_capture::fake::FakeAudioSource::from_samples(kind, 48_000, vec![0.0; 4_096]),
+            ))
+        }
+    }
+
+    struct FailingSourceFactory;
+
+    impl SourceFactory for FailingSourceFactory {
+        fn list_devices(&self, _kind: &TrackKind) -> Result<Vec<DeviceInfo>, String> {
+            Err("device enumeration unavailable".to_owned())
+        }
+
+        fn open(&self, _kind: TrackKind, _device_id: &str) -> Result<Box<dyn AudioSource>, String> {
+            Err("audio device busy: fake failure".to_owned())
+        }
+    }
+
+    struct MemoryViewSink {
+        title: Mutex<String>,
+        hud: Mutex<String>,
+    }
+
+    impl MemoryViewSink {
+        fn new() -> Self {
+            Self {
+                title: Mutex::new(String::new()),
+                hud: Mutex::new(String::new()),
+            }
+        }
+    }
+
+    impl ViewSink for MemoryViewSink {
+        fn publish(&self, view: &RecordingView) {
+            *self.title.lock().unwrap_or_else(|e| e.into_inner()) = view.title.clone();
+            *self.hud.lock().unwrap_or_else(|e| e.into_inner()) = view.hud.clone();
+        }
+    }
+
+    struct TestApp {
+        controller: RecordingController,
+        sink: Arc<MemoryViewSink>,
+    }
+
+    impl TestApp {
+        fn new(data_dir: &Path, factory: Box<dyn SourceFactory>) -> Self {
+            let sink = Arc::new(MemoryViewSink::new());
+            let settings = Settings {
+                data_dir: data_dir.to_path_buf(),
+                ..Settings::default()
+            };
+            let controller = RecordingController::new(settings, factory, sink.clone());
+            Self { controller, sink }
+        }
+
+        fn call(&self, command: &str, arg: &str) -> Result<String, String> {
+            match command {
+                "list_audio_devices" => {
+                    let kind = match arg {
+                        "system" => TrackKind::System,
+                        "mic" => TrackKind::Mic,
+                        other => return Err(format!("unknown track kind: {other}")),
+                    };
+                    let devices = self.controller.list_devices(&kind)?;
+                    serde_json::to_string(&devices).map_err(|error| error.to_string())
+                }
+                "start_recording" => self.controller.start(preset_from(arg)),
+                "pause_recording" => self.controller.pause(arg).map(|_| String::new()),
+                "resume_recording" => self.controller.resume(arg).map(|_| String::new()),
+                "stop_recording" => self.controller.stop(arg).map(|_| String::new()),
+                other => Err(format!("unknown command: {other}")),
+            }
+        }
+
+        fn window_title(&self) -> String {
+            self.sink
+                .title
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+
+        fn hud_text(&self) -> String {
+            self.sink
+                .hud
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+
+        fn trigger_hotkey(&self, name: &str) {
+            assert_eq!(name, "start_stop");
+            self.controller
+                .toggle()
+                .expect("the start/stop hotkey must toggle recording");
+        }
+    }
+
+    fn preset_from(value: &str) -> Preset {
+        match value {
+            "lecture" => Preset::Lecture,
+            "meeting" => Preset::Meeting,
+            other => panic!("unknown preset: {other}"),
+        }
+    }
+
+    #[test]
+    fn recording_state_is_visible_and_hotkey_toggles_it() {
+        let dir = tempfile::tempdir().expect("a temporary data directory");
+        let app = TestApp::new(dir.path(), Box::new(FakeSourceFactory));
+        app.call("start_recording", "lecture").unwrap();
+        assert!(app.window_title().contains("REC"));
+        assert!(app.hud_text().contains("system"));
+        assert!(app.hud_text().contains("mic"));
+        app.trigger_hotkey("start_stop");
+        assert!(!app.window_title().contains("REC"));
+    }
+
+    #[test]
+    fn commands_surface_typed_errors_as_non_zero_results() {
+        let dir = tempfile::tempdir().expect("a temporary data directory");
+        let app = TestApp::new(dir.path(), Box::new(FailingSourceFactory));
+        let error = app
+            .call("start_recording", "lecture")
+            .expect_err("a busy device must fail the command");
+        assert!(
+            error.contains("audio device busy: fake failure"),
+            "unexpected error: {error}"
+        );
+        assert!(!app.window_title().contains("REC"));
+    }
+
+    #[test]
+    fn listing_devices_reports_both_tracks() {
+        let dir = tempfile::tempdir().expect("a temporary data directory");
+        let app = TestApp::new(dir.path(), Box::new(FakeSourceFactory));
+        let system = app.call("list_audio_devices", "system").unwrap();
+        let mic = app.call("list_audio_devices", "mic").unwrap();
+        assert!(system.contains("Fake system audio"));
+        assert!(mic.contains("Fake microphone"));
+    }
 
     #[test]
     fn support_matrix_command_matches_spec() {
