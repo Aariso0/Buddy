@@ -285,10 +285,180 @@ jobs:
           path: target/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
-  # M1 adds real-capture soak jobs (Arch Linux and Windows). When they land they must
-  # be dependencies of `publish` so a failed soak on either OS blocks publishing.
+  # Real-capture soaks. Both are dependencies of `publish`: a failed soak on
+  # either OS blocks the release. Each exports chunk counts and gap markers via
+  # an `if: always()` report step so a failure still carries those numbers.
+  soak-linux:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    container: archlinux:base
+    timeout-minutes: 90
+    outputs:
+      chunk-summary: ${{ steps.report.outputs.chunk-summary }}
+      gap-summary: ${{ steps.report.outputs.gap-summary }}
+    steps:
+      - name: Install Arch Linux audio and build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git rust clang ffmpeg \
+            pipewire pipewire-pulse pipewire-audio wireplumber libpulse
+      - uses: actions/checkout@v4
+      - name: Create a null sink and a null source, then start PipeWire
+        run: |
+          set -euo pipefail
+          mkdir -p /etc/pipewire/pipewire.conf.d
+          # The loopback module exposes its capture stream as an Audio/Sink and
+          # its playback stream as an Audio/Source, so pipelines that play into
+          # the null sink also feed the null source. No hardware is involved.
+          cat > /etc/pipewire/pipewire.conf.d/soak-null-devices.conf <<'EOF'
+          context.modules = [
+            {
+              name = libpipewire-module-loopback
+              args = {
+                node.description = "Buddy soak null devices"
+                audio.rate = 48000
+                audio.position = [ FL FR ]
+                capture.props = {
+                  node.name = "soak_null_sink"
+                  node.description = "Buddy soak null sink"
+                  media.class = "Audio/Sink"
+                }
+                playback.props = {
+                  node.name = "soak_null_source"
+                  node.description = "Buddy soak null source"
+                  media.class = "Audio/Source"
+                }
+              }
+            }
+          ]
+          EOF
+          export XDG_RUNTIME_DIR=/run/user/0
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          pipewire &
+          wireplumber &
+          pipewire-pulse &
+          for _ in $(seq 1 60); do
+            pactl info >/dev/null 2>&1 && break
+            sleep 1
+          done
+          pactl info
+          pactl set-default-sink soak_null_sink
+          pactl set-default-source soak_null_source
+          pactl list short sinks
+          pactl list short sources
+      - name: Generate a 60-minute signal and run the real-capture soak
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR=/run/user/0
+          SOAK_LOG="${RUNNER_TEMP}/soak.log"
+          # 440 Hz tone at 48 kHz stereo, exactly 3600 seconds.
+          ffmpeg -nostdin -hide_banner -loglevel error \
+            -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=3600" \
+            -ac 2 -c:a pcm_s16le "${RUNNER_TEMP}/soak-tone.wav"
+          pw-play "${RUNNER_TEMP}/soak-tone.wav" &
+          PLAY_PID=$!
+          sleep 2
+          set +e
+          BUDDY_AUDIO_SOAK=1 cargo test -p buddy-capture \
+            --test linux_pipewire -- --nocapture 2>&1 | tee "${SOAK_LOG}"
+          STATUS=${PIPESTATUS[0]}
+          BUDDY_AUDIO_SOAK=1 cargo test -p buddy-capture \
+            --test soak_real -- --ignored --nocapture 2>&1 | tee -a "${SOAK_LOG}"
+          STATUS=$((STATUS + ${PIPESTATUS[0]}))
+          kill "${PLAY_PID}" 2>/dev/null || true
+          exit "${STATUS}"
+      - name: Report soak chunk counts and gap markers
+        id: report
+        if: always()
+        run: |
+          SOAK_LOG="${RUNNER_TEMP:-/tmp}/soak.log"
+          chunks="$(grep -E '^(System|Mic): [0-9]+ chunks' "${SOAK_LOG}" 2>/dev/null | tr '\n' ';' || true)"
+          gaps="$(grep -E '^gaps: ' "${SOAK_LOG}" 2>/dev/null | tr '\n' ';' || true)"
+          echo "chunk-summary=${chunks:-unavailable}" >> "$GITHUB_OUTPUT"
+          echo "gap-summary=${gaps:-unavailable}" >> "$GITHUB_OUTPUT"
+          {
+            echo '### Soak results'
+            echo "Chunk counts: ${chunks:-unavailable}"
+            echo "Gap markers: ${gaps:-unavailable}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  soak-windows:
+    if: github.event_name == 'push'
+    # Self-hosted runner registered with these labels, with a real default
+    # render endpoint and a real default capture endpoint. Hosted runners have
+    # no audio endpoint, so this job must never run on windows-latest.
+    runs-on: [self-hosted, windows, buddy-audio-soak]
+    timeout-minutes: 90
+    outputs:
+      chunk-summary: ${{ steps.report.outputs.chunk-summary }}
+      gap-summary: ${{ steps.report.outputs.gap-summary }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate a 60-minute signal and run the real-capture soak
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tone = Join-Path $env:RUNNER_TEMP 'soak-tone.wav'
+          $rate = 48000
+          $samples = $rate * 10
+          $dataBytes = $samples * 2
+          $stream = [System.IO.File]::Open($tone, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+          $writer = [System.IO.BinaryWriter]::new($stream)
+          $writer.Write([System.Text.Encoding]::ASCII.GetBytes('RIFF'))
+          $writer.Write([uint32](36 + $dataBytes))
+          $writer.Write([System.Text.Encoding]::ASCII.GetBytes('WAVE'))
+          $writer.Write([System.Text.Encoding]::ASCII.GetBytes('fmt '))
+          $writer.Write([uint32]16)
+          $writer.Write([uint16]1)
+          $writer.Write([uint16]1)
+          $writer.Write([uint32]$rate)
+          $writer.Write([uint32]($rate * 2))
+          $writer.Write([uint16]2)
+          $writer.Write([uint16]16)
+          $writer.Write([System.Text.Encoding]::ASCII.GetBytes('data'))
+          $writer.Write([uint32]$dataBytes)
+          for ($i = 0; $i -lt $samples; $i++) {
+            $writer.Write([int16][math]::Round(12000 * [math]::Sin(2 * [math]::PI * 440 * $i / $rate)))
+          }
+          $writer.Dispose()
+          # WASAPI loopback captures the default render endpoint's mix, so a
+          # looping generated tone is a 60-minute signal on that endpoint.
+          $player = [System.Media.SoundPlayer]::new($tone)
+          $player.PlayLooping()
+          $log = Join-Path $env:RUNNER_TEMP 'soak.log'
+          try {
+            $env:BUDDY_AUDIO_SOAK = '1'
+            cargo test -p buddy-capture --test windows_wasapi -- --nocapture 2>&1 | Tee-Object -FilePath $log
+            if ($LASTEXITCODE -ne 0) { throw "windows_wasapi integration tests failed ($LASTEXITCODE)" }
+            cargo test -p buddy-capture --lib windows::tests -- --nocapture 2>&1 | Tee-Object -FilePath $log -Append
+            if ($LASTEXITCODE -ne 0) { throw "windows::tests failed ($LASTEXITCODE)" }
+            cargo test -p buddy-capture --test soak_real -- --ignored --nocapture 2>&1 | Tee-Object -FilePath $log -Append
+            if ($LASTEXITCODE -ne 0) { throw "soak_real failed ($LASTEXITCODE)" }
+          } finally {
+            $player.Stop()
+            $player.Dispose()
+          }
+      - name: Report soak chunk counts and gap markers
+        id: report
+        if: always()
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'soak.log'
+          $lines = if (Test-Path $log) { Get-Content $log } else { @() }
+          $chunks = (($lines | Where-Object { $_ -match '^(System|Mic): \d+ chunks' }) -join '; ')
+          $gaps = (($lines | Where-Object { $_ -match '^gaps: ' }) -join '; ')
+          if (-not $chunks) { $chunks = 'unavailable' }
+          if (-not $gaps) { $gaps = 'unavailable' }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "chunk-summary=$chunks"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "gap-summary=$gaps"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '### Soak results'
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "Chunk counts: $chunks"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "Gap markers: $gaps"
+
   publish:
-    needs: [prepare, package-linux, package-windows, package-macos]
+    needs: [prepare, package-linux, package-windows, package-macos, soak-linux, soak-windows]
     if: github.event_name == 'push' && needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:

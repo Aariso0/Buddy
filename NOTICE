@@ -113,8 +113,8 @@ Notes on multi-license entries:
   - thiserror and thiserror-impl appear twice: 1.0.69 is used directly by
     buddy-core, and 2.0.21 is a transitive dependency of redox_users (a
     Redox-target-only dependency of dirs-sys). Both are MIT OR Apache-2.0.
-  - The three workspace crates (buddy-core, buddy-cli, buddy-desktop) are
-    first-party Apache-2.0 and are not listed here.
+  - The four workspace crates (buddy-core, buddy-capture, buddy-cli,
+    buddy-desktop) are first-party Apache-2.0 and are not listed here.
    - The fifteen crates added for the CLI harness (anstream, anstyle,
      anstyle-parse, anstyle-query, anstyle-wincon, clap, clap_builder,
      clap_derive, clap_lex, colorchoice, heck, is_terminal_polyfill,
