@@ -180,16 +180,9 @@ jobs:
           # resources alone would not put them in the tar.gz we ship.
           stage="$(mktemp -d)"
           mkdir -p "$stage/legal"
-          cp NOTICE LICENSE "$stage/legal/"
-
-          # NOTICE requires the MPL text to accompany the distribution. It is
-          # already on disk at the exact version used by this build.
-          mpl_text="$(find "$HOME/.cargo/registry/src" -type f -path '*/cssparser-0.38.0/LICENSE' -print -quit)"
-          if [ -z "$mpl_text" ]; then
-            echo "MPL text for cssparser 0.38.0 is missing from the cargo registry" >&2
-            exit 1
-          fi
-          cp "$mpl_text" "$stage/legal/LICENSE-MPL-2.0.txt"
+          # NOTICE requires the MPL text to accompany the distribution. Keep a
+          # copy in the repo: the MPL crates are not fetched on every target.
+          cp NOTICE LICENSE LICENSE-MPL-2.0.txt "$stage/legal/"
 
           {
             echo "# MPL-2.0 source locations for Buddy $RELEASE_VERSION"
