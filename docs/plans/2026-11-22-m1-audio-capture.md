@@ -20,12 +20,12 @@
 | 2 — Engine, ring buffer, chunks, gap markers | complete | `d4747ca`, `f0ac818` | 4 Important findings fixed; re-review clean |
 | 3 — Session integration, data dir, UUID rule, recovery | complete | `8d35d16` | clean; 2 Minor findings deferred |
 | 4 — Linux PipeWire backend | complete | `7b86295`, `efdf0ea`, `b44b2eb` | 2 Important findings fixed; re-review clean |
-| 5 — Windows WASAPI loopback backend (S2) | in progress | — | implementer running; Windows verification will be reported honestly |
-| 6 — macOS backend spike (S1), UNVERIFIED | pending | — | — |
+| 5 — Windows WASAPI loopback backend (S2) | complete | `eb136ae`, `5e0500d` | 1 Important test-integrity finding fixed; re-review clean; Windows UNVERIFIED |
+| 6 — macOS backend spike (S1), UNVERIFIED | in progress | — | implementer running; no backend if S1 finds no viable path |
 | 7 — Desktop control surface and visible state | pending | — | — |
 | 8 — Soak jobs, publish gating, legal recheck | pending | — | — |
 
-Current branch head: `b44b2eb`. Nothing has been pushed. This section is updated after each task's review; the SDD ledger holds the per-finding detail.
+Current branch head: `5e0500d`. Nothing has been pushed. Windows compilation, contract tests and real loopback capture remain UNVERIFIED on this Linux host and are gated on Task 8's Windows soak. This section is updated after each task's review; the SDD ledger holds the per-finding detail.
 
 ### Execution rulings made so far
 
@@ -39,7 +39,8 @@ These are implementation rulings under the binding spec, not scope changes. Each
 - The brief's uppercase UUID literal was all digits, so `.to_uppercase()` was a no-op. Only the test literal was corrected to a hex-letter v4 UUID; production validation is unchanged.
 - Linux uses `pipewire = "=0.10.1"` (MIT), verified upstream and recorded in `NOTICE`. CI installs `libpipewire-0.3-dev` in both Linux apt lists. Headless tests accept a typed absence error; real capture is deferred to Task 8's Arch soak.
 - Unknown PipeWire device ids fail at `open()`/`reconnect()` through the same registry used by `list_devices`. An empty-ring deadline returns a typed `Backend` error, never `Ok(0)` end-of-stream.
-- Windows compilation and capture cannot be verified from this Linux host. Task 5 must report them as UNVERIFIED until a Windows target/CI soak runs; no local pass will be claimed.
+- Windows compilation and capture cannot be verified from this Linux host. Task 5 reports them as UNVERIFIED until a Windows target/CI soak runs; no local pass was claimed. The pinned `wasapi = "=0.27.0"` MIT binding sets `AUDCLNT_STREAMFLAGS_LOOPBACK` for render→capture in shared mode; the exclusive-mode limitation is documented in the design doc and `NOTICE`.
+- A Windows contract test must never treat an arbitrary `Backend` error as "no device": device presence comes from `list_devices`, assertions are unconditional when a real endpoint exists, and genuine no-device is an explicit reason-labelled skip. `BUDDY_AUDIO_SOAK=1` makes absence a hard failure for Task 8's runner.
 
 ### Deferred review findings for final review
 
@@ -47,6 +48,7 @@ These are implementation rulings under the binding spec, not scope changes. Each
 - Task 2: second `start()` after `stop()` can leak a writer thread; blocking backend `read()` can hang `stop()`; unchecked WAV size conversions; malformed gap JSON uses `InvalidChunk`; `ChunkInfo.frames` counts interleaved values, not block-aligned frames; `both_tracks_record_simultaneously` checks presence only; `GapMarker` has no track field.
 - Task 3: `empty_reserved_dir_is_not_adopted` does not assert `recover_session` explicitly; failing-finalize error mapping has no dedicated test.
 - Task 4: format/channel negotiation not checked; `pending_error` reports `DeviceLost` after close/failed reconnect; connect-timeout worker can linger briefly; poisoned `Mutex` in `list_devices` degrades silently; live-runtime test does not assert `count > 0`.
+- Task 5: `shutdown_worker` swallows timeouts then unbounded `join()` can hang close/reconnect; error slots are consumed so repeat device-loss reads return `Backend("")`; `list_devices`/`spawn_worker` timeouts leave brief stray threads; public `open_for` permits inconsistent kind/id pairs; `reconnect` publishes LIVE before worker success and leaves a stale sample rate; full-ring pushes are dropped without an overflow signal.
 
 ## Global Constraints
 
