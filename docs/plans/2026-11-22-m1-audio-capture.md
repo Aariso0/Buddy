@@ -22,10 +22,10 @@
 | 4 — Linux PipeWire backend | complete | `7b86295`, `efdf0ea`, `b44b2eb` | 2 Important findings fixed; re-review clean |
 | 5 — Windows WASAPI loopback backend (S2) | complete | `eb136ae`, `5e0500d` | 1 Important test-integrity finding fixed; re-review clean; Windows UNVERIFIED |
 | 6 — macOS backend spike (S1), UNVERIFIED | complete | `7cdb496`, `65d09ef` | 3 Important findings fixed; re-review clean; macOS runtime UNVERIFIED |
-| 7 — Desktop control surface and visible state | in progress | — | implementer running; owns `ensure_data_dir` call site and macOS Info.plist key |
-| 8 — Soak jobs, publish gating, legal recheck | pending | — | — |
+| 7 — Desktop control surface and visible state | complete | `909dc7e`, `f7c7edd` | 1 Critical + 1 Important fixed; re-review clean; macOS desktop compile UNVERIFIED |
+| 8 — Soak jobs, publish gating, legal recheck | in progress | — | implementer running; Windows endpoint decision may require user input |
 
-Current branch head: `65d09ef`. Nothing has been pushed. Windows compilation, contract tests and real loopback capture remain UNVERIFIED on this Linux host and are gated on Task 8's Windows soak. macOS linking, test execution and real capture also remain UNVERIFIED; a clean Apple-target type-check is not a runtime pass. This section is updated after each task's review; the SDD ledger holds the per-finding detail.
+Current branch head: `f7c7edd`. Nothing has been pushed. Windows compilation, contract tests and real loopback capture remain UNVERIFIED on this Linux host and are gated on Task 8's Windows soak. macOS linking, test execution and real capture also remain UNVERIFIED; a clean Apple-target type-check is not a runtime pass. This section is updated after each task's review; the SDD ledger holds the per-finding detail.
 
 ### Execution rulings made so far
 
@@ -42,7 +42,8 @@ These are implementation rulings under the binding spec, not scope changes. Each
 - Windows compilation and capture cannot be verified from this Linux host. Task 5 reports them as UNVERIFIED until a Windows target/CI soak runs; no local pass was claimed. The pinned `wasapi = "=0.27.0"` MIT binding sets `AUDCLNT_STREAMFLAGS_LOOPBACK` for render→capture in shared mode; the exclusive-mode limitation is documented in the design doc and `NOTICE`.
 - A Windows contract test must never treat an arbitrary `Backend` error as "no device": device presence comes from `list_devices`, assertions are unconditional when a real endpoint exists, and genuine no-device is an explicit reason-labelled skip. `BUDDY_AUDIO_SOAK=1` makes absence a hard failure for Task 8's runner.
 - macOS S1 resolved via CoreAudio process taps on 14.2+ (`coreaudio = "=0.6.2"`, `process-tap` feature), no virtual device; ScreenCaptureKit's binding needs macOS 15+ for mic and was rejected. macOS tap teardown is order-pinned (aggregate before tap), worker shutdown is idempotent/bounded, and a `DEVICE_IS_ALIVE` listener plus direct probe makes unplugs typed `DeviceLost` so reconnect works. Apple-target `cargo check --all-targets` passed but proves types only.
-- The desktop shell must add `NSAudioCaptureUsageDescription` or macOS taps get TCC-denied silence; it must also call `ensure_data_dir` before the first settings write or session creation. Task 7 owns both.
+- The desktop shell carries both `NSAudioCaptureUsageDescription` (system taps) and `NSMicrophoneUsageDescription` (mic input) or macOS capture is TCC-denied into silence; it also calls `ensure_data_dir` before the first settings write or session creation. macOS desktop compilation remains UNVERIFIED because no Apple SDK is available for the Tauri crate.
+- A typed stop failure must discard the dead engine and publish an error-annotated idle view: the engine clears `started` before its fallible returns, so restoring it wedges the app on REC. `create_session` takes an explicit `preset` with no hidden default so `start_recording("meeting")` really persists `Meeting` in `session.json`.
 
 ### Deferred review findings for final review
 
@@ -52,6 +53,7 @@ These are implementation rulings under the binding spec, not scope changes. Each
 - Task 4: format/channel negotiation not checked; `pending_error` reports `DeviceLost` after close/failed reconnect; connect-timeout worker can linger briefly; poisoned `Mutex` in `list_devices` degrades silently; live-runtime test does not assert `count > 0`.
 - Task 5: `shutdown_worker` swallows timeouts then unbounded `join()` can hang close/reconnect; error slots are consumed so repeat device-loss reads return `Backend("")`; `list_devices`/`spawn_worker` timeouts leave brief stray threads; public `open_for` permits inconsistent kind/id pairs; `reconnect` publishes LIVE before worker success and leaves a stale sample rate; full-ring pushes are dropped without an overflow signal.
 - Task 6: consumed error slots make repeat reads `Backend("")` and allocate on fallback; 500 ms `yield_now` spin; `CHANNELS = 2` without channel normalization for mono/multichannel mics; contract test accepts silent taps (`count > 0` only) and `BUDDY_AUDIO_SOAK=1` cannot catch silence; `list_devices` `Backend` error skips outside soak mode.
+- Task 7: system source not `close()`d on a failed start; discarded title/tray/emit results in the view sink; discarded hotkey/tray toggle errors; missing failed-stop/preset tests (the latter two now covered by the fix round's tests).
 
 ## Global Constraints
 
