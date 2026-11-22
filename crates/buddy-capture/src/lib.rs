@@ -9,6 +9,8 @@ pub mod fake;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod ring;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

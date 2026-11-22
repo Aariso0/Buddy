@@ -717,3 +717,68 @@ Notes on Linux PipeWire dependency licenses:
   - shlex 1.3.0, system-deps 7.0.8, target-lexicon 0.13.5 and libloading
     0.8.9 are new versions of names already listed above; both versions are
     recorded where the lockfile pins both.
+
+Windows WASAPI backend dependencies (M1 S2)
+-------------------------------------------
+
+License/capability spike result: the chosen binding is the upstream `wasapi`
+crate, pinned to exactly 0.27.0 in crates/buddy-capture/Cargo.toml. It is
+maintained by HEnquist (repository https://github.com/HEnquist/wasapi-rs);
+version 0.27.0 was published 2026-11-06, the repository had commits as recent
+as 2026-11-19, and the crate has 29 published versions. Sources checked: the
+crates.io API record for `wasapi` 0.27.0 (license `MIT`, rust-version 1.85,
+checksum 58b35dbcb6fae6fbaba9f6f52a22686bb405978ee112ed6eb33d98bd63c97583),
+the docs.rs 0.27.0 page (MIT, x86_64-pc-windows-msvc), the published crate
+source downloaded from crates.io (Cargo.toml.orig `license = "MIT"`,
+LICENSE.txt, README.md, examples/record.rs and the device-backed error tests),
+the upstream repository README/examples/commits, and the Microsoft "Loopback
+Recording" and "Exclusive-Mode Streams" documents.
+
+The published README lists "Loopback capture" and shared/exclusive modes.
+Upstream 0.27.0 sets `AUDCLNT_STREAMFLAGS_LOOPBACK` when an `AudioClient` from a
+render endpoint is initialised with `Direction::Capture` in shared mode, and
+returns `WasapiError::LoopbackWithExclusiveMode` for the exclusive-mode
+combination. Microsoft's loopback document confirms that loopback works without
+a virtual cable (it uses a hardware loopback pin when present, otherwise copies
+the audio-engine output), that it is shared-mode only, and that event-driven
+loopback clients are supported on Windows 10 version 1703 and later. Buddy's
+System track therefore opens the default render endpoint in shared loopback
+mode; the Mic track opens the default capture endpoint. No virtual loopback
+device is installed or required. Exclusive-mode limitation: an application that
+holds an endpoint exclusively seizes it and silences other applications; a
+shared-mode loopback stream cannot capture that application's audio.
+
+The exact MIT text from wasapi 0.27.0's LICENSE.txt is reproduced here:
+
+    Copyright (c) 2020 Henrik Enquist
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+New locked crate:
+
+   num-integer 0.1.47                            MIT OR Apache-2.0
+
+Notes on Windows WASAPI dependency licenses:
+   - wasapi 0.27.0 is MIT. Keep the notice above with any Windows distribution
+     that includes it.
+   - num-integer 0.1.47 is MIT OR Apache-2.0 and is used under MIT terms. Its
+     dependency num-traits 0.2.19, plus log 0.4.35, thiserror 2.0.21, windows
+     0.62.2 and windows-core 0.62.2, were already listed above.
+   - No MPL-2.0 crate is introduced by this backend, so the exact-version
+     source-locations generator in .github/workflows/ci.yml is unchanged.

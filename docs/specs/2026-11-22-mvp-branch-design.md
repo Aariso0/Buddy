@@ -91,7 +91,7 @@ All dependencies are pinned in lockfiles and their licenses verified before adop
 ## 6. Risks carried into implementation
 
 - S1–S10 in `plan.md` §19 are all still open. Real capture will be exercised on Arch Linux and Windows; no macOS machine is confirmed, so macOS capture ships UNVERIFIED despite the plan's three-OS exit criteria. A failed soak on Arch Linux or Windows blocks release until fixed.
-- Windows 10+ is supported with known backend limitations accepted; S2 must characterise them so the docs can state them honestly.
+- Windows 10+ is supported with the WASAPI backend's limitation characterised and accepted. Buddy captures system audio with a shared-mode WASAPI loopback on the default render endpoint (`wasapi` 0.27.0, MIT). Microsoft documents loopback as shared-mode only — exclusive-mode streams cannot operate in loopback mode — and event-driven loopback clients are supported on Windows 10 version 1703 and later. A shared-mode loopback stream captures what the audio engine mixes for the endpoint; when an application takes the endpoint exclusively it seizes the device and silences other applications, so that application's audio is not available to Buddy's loopback and the stream may report device loss. No virtual loopback device is required. Release notes must state this plainly.
 - Linux support is PipeWire-only; S3 must cover the Wayland portal behaviour on Arch.
 - Hindi accuracy, live-preview latency and Devanagari FTS5 tokenization are unmeasured; defaults and quality claims must wait for S4 and S6.
 - Unsigned artifacts will produce user-visible OS warnings; the install steps above are part of the deliverable, not an afterthought.
