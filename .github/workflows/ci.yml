@@ -426,9 +426,9 @@ jobs:
           # WASAPI loopback captures the default render endpoint's mix, so a
           # looping generated tone is a 60-minute signal on that endpoint.
           $player = [System.Media.SoundPlayer]::new($tone)
-          $player.PlayLooping()
           $log = Join-Path $env:RUNNER_TEMP 'soak.log'
           try {
+            $player.PlayLooping()
             $env:BUDDY_AUDIO_SOAK = '1'
             cargo test -p buddy-capture --test windows_wasapi -- --nocapture 2>&1 | Tee-Object -FilePath $log
             if ($LASTEXITCODE -ne 0) { throw "windows_wasapi integration tests failed ($LASTEXITCODE)" }

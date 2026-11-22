@@ -25,6 +25,14 @@ use buddy_capture::windows::WasapiSource as RealSource;
 
 const SESSION_ID: &str = "11111111-1111-4111-8111-111111111111";
 const SOAK_SECONDS: u64 = 60 * 60;
+const SAMPLE_RATE: u32 = 48_000;
+const CHANNELS: u16 = 2;
+// `ChunkInfo::frames` counts interleaved f32 values, so a full one-second
+// stereo chunk at 48 kHz is 48_000 * 2 = 96_000 values.
+const FULL_CHUNK_VALUES: u32 = SAMPLE_RATE * CHANNELS as u32;
+// 95% of the 3600 s target. Tolerates normal start/stop drift, but an early
+// stop or systematically short chunks cannot pass as a full-hour soak.
+const MIN_COVERAGE_SECONDS: u64 = (SOAK_SECONDS * 95) / 100;
 
 // Bare ids select the System track on both backends; Mic ids are prefixed.
 const SYSTEM_ID: &str = "default";
@@ -112,12 +120,28 @@ fn sixty_minute_real_capture_has_two_gap_free_chunk_sequences() {
                 "{kind:?} chunk sequence is not gap-free: {sequence:?}"
             );
             assert!(
-                chunk.frames > 0 && chunk.sample_rate == 48_000 && chunk.channels == 2,
+                chunk.frames > 0 && chunk.sample_rate == SAMPLE_RATE && chunk.channels == CHANNELS,
                 "{kind:?} published an invalid chunk: {chunk:?}"
             );
+            // The writer publishes only full chunks while capturing and
+            // flushes at most one short chunk on stop. A short chunk before
+            // the last one is lost audio, even with no gap marker.
+            assert!(
+                chunk.frames >= FULL_CHUNK_VALUES || expected_index + 1 == sequence.len() as u32,
+                "{kind:?} chunk {expected_index} is short: {} values, expected >= {FULL_CHUNK_VALUES}; only the final chunk may be partial: {chunk:?}",
+                chunk.frames
+            );
         }
+        let total_values: u64 = sequence.iter().map(|chunk| u64::from(chunk.frames)).sum();
+        let values_per_second = u64::from(SAMPLE_RATE) * u64::from(CHANNELS);
+        let covered_seconds = total_values / values_per_second;
+        assert!(
+            covered_seconds >= MIN_COVERAGE_SECONDS,
+            "{kind:?} covered only {covered_seconds}s of the {SOAK_SECONDS}s target (minimum {MIN_COVERAGE_SECONDS}s): {total_values} values in {} chunks",
+            sequence.len()
+        );
         println!(
-            "{kind:?}: {} chunks, indices 0..{}",
+            "{kind:?}: {} chunks, {covered_seconds}s, indices 0..{}",
             sequence.len(),
             sequence.len() - 1
         );

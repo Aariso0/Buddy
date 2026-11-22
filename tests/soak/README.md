@@ -16,15 +16,26 @@ tracks, captures for exactly 3600 seconds, stops cleanly, and then asserts:
 - `read_chunk_index` returns **two** sequences (System and Mic) that are valid
   and gap-free: non-empty, `index == 0, 1, 2, …` with no missing index,
   `frames > 0`, 48 000 Hz, 2 channels.
+- Each track covers at least **3 420 seconds = 95% of the 3 600 s target**.
+  Coverage is `sum(chunk.frames) / (48 000 × 2)` interleaved f32 values per
+  second, so an early stop cannot pass merely because the indices are
+  contiguous and no gap marker was written.
+- Every chunk except the single final one has at least **96 000 interleaved
+  f32 values** (48 000 frames × 2 channels = one full second). The writer
+  publishes only full chunks while capturing and flushes at most one short
+  chunk on stop; a short chunk before the last one is lost audio. The final
+  chunk may be partial but must still contain at least one value.
 - The System track's first chunk contains the generated tone (peak amplitude
   above 0.01), proving the signal actually reached the captured endpoint
   rather than the soak recording silence.
 
 A **zero-lost-chunk pass** therefore means the full hour was published as two
-continuous chunk sequences with no overrun, no device re-arm, and no short or
-missing chunk. The job prints the per-track chunk counts (normally about 3600
-per track) and the gap-marker list; both are exported as job outputs and shown
-in the job summary even when the soak fails.
+continuous chunk sequences with no overrun, no device re-arm, no fewer than
+3 420 s of audio per track, no short chunk other than a possible final partial
+chunk, and no missing chunk. The job prints the per-track chunk counts and
+coverage in seconds (normally about 3600 chunks / 3600 s per track) and the
+gap-marker list; both are exported as job outputs and shown in the job summary
+even when the soak fails.
 
 These soaks cannot be fully exercised on a development Linux host without the
 matching audio graph/endpoint; CI is the place they run. Do not report a local
