@@ -145,22 +145,28 @@ impl SourceFactory for PlatformSources {
     }
 
     fn open(&self, kind: TrackKind, device_id: &str) -> Result<Box<dyn AudioSource>, String> {
+        // Device ids follow the `list_devices` convention: the `mic:` prefix
+        // carries the track. `AudioSource::open` decodes that prefix;
+        // `open_for` takes an already-decoded raw id and validates it verbatim.
         #[cfg(target_os = "linux")]
         {
-            let source = buddy_capture::linux::PipeWireSource::open_for(kind, device_id)
+            let source = <buddy_capture::linux::PipeWireSource as AudioSource>::open(device_id)
                 .map_err(|error| error.to_string())?;
+            debug_assert_eq!(source.kind(), kind);
             Ok(Box::new(source))
         }
         #[cfg(target_os = "macos")]
         {
-            let source = buddy_capture::macos::CoreAudioSource::open_for(kind, device_id)
+            let source = <buddy_capture::macos::CoreAudioSource as AudioSource>::open(device_id)
                 .map_err(|error| error.to_string())?;
+            debug_assert_eq!(source.kind(), kind);
             Ok(Box::new(source))
         }
         #[cfg(target_os = "windows")]
         {
-            let source = buddy_capture::windows::WasapiSource::open_for(kind, device_id)
+            let source = <buddy_capture::windows::WasapiSource as AudioSource>::open(device_id)
                 .map_err(|error| error.to_string())?;
+            debug_assert_eq!(source.kind(), kind);
             Ok(Box::new(source))
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -726,6 +732,25 @@ mod tests {
         let mic = app.call("list_audio_devices", "mic").unwrap();
         assert!(system.contains("Fake system audio"));
         assert!(mic.contains("Fake microphone"));
+    }
+
+    /// `MIC_DEVICE_ID` mirrors the encoded ids returned by `list_devices(Mic)`.
+    /// It must reach the backend's decoding `AudioSource::open`, never the
+    /// `open_for(kind, raw_id)` entry point, which validates the id verbatim.
+    /// The fake factory ignores ids, so only the real factory can pin this.
+    #[test]
+    fn platform_sources_decodes_the_encoded_mic_id_before_opening() {
+        // A live device is not required. A decoded `default` either opens or
+        // fails later in the backend's device layer; an encoded id forwarded
+        // to `open_for` is rejected by id validation with the literal
+        // `mic:default` in the error. That is the pre-fix failure this catches.
+        match PlatformSources.open(TrackKind::Mic, MIC_DEVICE_ID) {
+            Ok(source) => assert_eq!(source.kind(), TrackKind::Mic),
+            Err(error) => assert!(
+                !error.contains(MIC_DEVICE_ID),
+                "encoded device id reached open_for undecoded: {error}"
+            ),
+        }
     }
 
     #[test]
