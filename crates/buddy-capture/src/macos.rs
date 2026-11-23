@@ -15,11 +15,25 @@
 
 use crate::ring::RingBuffer;
 use crate::{AudioSource, CaptureError, DeviceInfo, TrackKind};
-use coreaudio::{
-    AppTapAggregateDevice, AudioObject, CoreAudioError, ErrorKind, ProcessTap, Scope, System,
-    TapMute, DEVICE_IS_ALIVE, DEVICE_NAME, DEVICE_NOMINAL_SAMPLE_RATE, DEVICE_UID,
-    PROCESS_BUNDLE_ID,
+use core_foundation::{
+    array::CFArray,
+    base::{CFType, TCFType},
+    boolean::CFBoolean,
+    dictionary::CFDictionary,
+    string::CFString,
 };
+use coreaudio::{
+    AudioObject, CoreAudioError, ErrorKind, ProcessTap, Scope, System, TapMute, DEVICE_IS_ALIVE,
+    DEVICE_NAME, DEVICE_NOMINAL_SAMPLE_RATE, DEVICE_UID, PROCESS_BUNDLE_ID,
+};
+use objc2_core_audio::{
+    kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceIsStackedKey,
+    kAudioAggregateDeviceNameKey, kAudioAggregateDeviceTapAutoStartKey,
+    kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey, kAudioSubTapDriftCompensationKey,
+    kAudioSubTapUIDKey, AudioHardwareCreateAggregateDevice, AudioHardwareDestroyAggregateDevice,
+    AudioObjectID,
+};
+use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -69,9 +83,81 @@ struct OrderedDrop<A, B> {
     second: B,
 }
 
+/// Private aggregate built from a process tap. Auto-start is disabled so
+/// starting the I/O proc does not wait for tapped audio to begin.
+struct TapAggregate(AudioObject<coreaudio::Device>);
+
+impl TapAggregate {
+    fn device(&self) -> AudioObject<coreaudio::Device> {
+        self.0
+    }
+}
+
+impl Drop for TapAggregate {
+    fn drop(&mut self) {
+        unsafe {
+            AudioHardwareDestroyAggregateDevice(self.0.id());
+        }
+    }
+}
+
+fn cf_key(key: &CStr) -> CFString {
+    CFString::new(&key.to_string_lossy())
+}
+
+fn tap_aggregate(name: &str, uid: &str, tap_uid: &str) -> Result<TapAggregate, CoreAudioError> {
+    let tap = CFDictionary::from_CFType_pairs(&[
+        (
+            cf_key(kAudioSubTapUIDKey),
+            CFString::new(tap_uid).as_CFType(),
+        ),
+        (
+            cf_key(kAudioSubTapDriftCompensationKey),
+            CFBoolean::true_value().as_CFType(),
+        ),
+    ]);
+    let taps = CFArray::from_CFTypes(&[tap]);
+    let description = CFDictionary::from_CFType_pairs(&[
+        (
+            cf_key(kAudioAggregateDeviceNameKey),
+            CFString::new(name).as_CFType(),
+        ),
+        (
+            cf_key(kAudioAggregateDeviceUIDKey),
+            CFString::new(uid).as_CFType(),
+        ),
+        (
+            cf_key(kAudioAggregateDeviceIsPrivateKey),
+            CFBoolean::true_value().as_CFType(),
+        ),
+        (
+            cf_key(kAudioAggregateDeviceIsStackedKey),
+            CFBoolean::false_value().as_CFType(),
+        ),
+        // Auto-start would make AudioDeviceStart wait for the first tapped
+        // buffer; an idle desktop would never finish opening the source.
+        (
+            cf_key(kAudioAggregateDeviceTapAutoStartKey),
+            CFBoolean::false_value().as_CFType(),
+        ),
+        (cf_key(kAudioAggregateDeviceTapListKey), taps.as_CFType()),
+    ]);
+    let mut id: AudioObjectID = 0;
+    let status = unsafe {
+        AudioHardwareCreateAggregateDevice(
+            &*description.as_concrete_TypeRef().cast(),
+            (&mut id).into(),
+        )
+    };
+    if status != 0 {
+        return Err(CoreAudioError::from(status));
+    }
+    Ok(TapAggregate(AudioObject::<coreaudio::Device>::from(id)))
+}
+
 /// The aggregate must be destroyed before the tap it reads, so it is declared
 /// first. The I/O proc is dropped before this whole value in the worker.
-type SystemTap = OrderedDrop<AppTapAggregateDevice, ProcessTap>;
+type SystemTap = OrderedDrop<TapAggregate, ProcessTap>;
 
 fn backend_error(message: impl Into<String>) -> CaptureError {
     CaptureError::Backend(message.into())
@@ -220,8 +306,7 @@ fn resolve_device(
                 .map_err(map_error)?;
             let sequence = AGGREGATE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let aggregate_uid = format!("buddy-system-{}-{sequence}", std::process::id());
-            let aggregate = AppTapAggregateDevice::with_tap(name, &aggregate_uid, tap.uid())
-                .map_err(map_error)?;
+            let aggregate = tap_aggregate(name, &aggregate_uid, tap.uid()).map_err(map_error)?;
             let device = aggregate.device();
             Ok((
                 device,
