@@ -19,6 +19,12 @@ use tauri_plugin_global_shortcut::{Builder as ShortcutBuilder, ShortcutState};
 use uuid::Uuid;
 
 const HOTKEY_START_STOP: &str = "CommandOrControl+Shift+R";
+// The display label must match CommandOrControl+Shift+R on every platform.
+const HUD_HOTKEY: &str = if cfg!(target_os = "macos") {
+    "Command+Shift+R"
+} else {
+    "Ctrl+Shift+R"
+};
 const TRAY_ID: &str = "buddy-tray";
 const TRAY_TOGGLE_ID: &str = "tray-toggle-recording";
 const TRAY_QUIT_ID: &str = "tray-quit";
@@ -68,7 +74,7 @@ fn view_for(active: Option<&ActiveRecording>) -> RecordingView {
             phase: ViewPhase::Idle,
             session_id: None,
             title: "Buddy".to_owned(),
-            hud: "system: idle · mic: idle · hotkey: Ctrl+Shift+R".to_owned(),
+            hud: format!("system: idle · mic: idle · hotkey: {HUD_HOTKEY}"),
         };
     };
 
@@ -222,11 +228,17 @@ impl RecordingController {
             .clone()
     }
 
-    fn publish(&self, view: RecordingView) {
-        *self
-            .view
+    fn lock_view(&self) -> std::sync::MutexGuard<'_, RecordingView> {
+        self.view
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = view.clone();
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Store and emit under one guard: two concurrent publications must not
+    /// reach the frontend in a different order from the stored snapshot.
+    fn publish(&self, view: RecordingView) {
+        let mut stored = self.lock_view();
+        *stored = view.clone();
         self.sink.publish(&view);
     }
 
@@ -234,13 +246,36 @@ impl RecordingController {
         self.factory.list_devices(kind)
     }
 
-    fn begin_operation(&self) -> Result<(), String> {
+    /// Check for an active recording and reserve the busy flag under a single
+    /// lock. Two concurrent starts can no longer both pass the active check
+    /// before either claims the slot.
+    fn reserve_start(&self) -> Result<(), String> {
         let mut slot = self.lock_slot();
+        if slot.active.is_some() {
+            return Err("a recording is already running; stop it first".to_owned());
+        }
         if slot.busy {
             return Err("another recording operation is in progress".to_owned());
         }
         slot.busy = true;
         Ok(())
+    }
+
+    fn publish_error(&self, cause: &str) {
+        // Read, amend and emit under the same view guard as publish(), so a
+        // concurrent state change cannot be overwritten by a stale error view.
+        // Only the HUD changes: phase and session id stay as they are.
+        let mut view = self.lock_view();
+        view.hud = format!("{} · action failed: {cause}", view.hud);
+        self.sink.publish(&view);
+    }
+
+    /// Tray and global-hotkey callbacks use this so a failed toggle is visible
+    /// in the HUD instead of being silently discarded.
+    fn toggle_from_ui(&self) {
+        if let Err(error) = self.toggle() {
+            self.publish_error(&error);
+        }
     }
 
     fn start_inner(&self, preset: Preset) -> Result<(ActiveRecording, RecordingView), String> {
@@ -264,7 +299,8 @@ impl RecordingController {
                 system,
                 mic,
                 CaptureConfig::default(),
-            );
+            )
+            .map_err(|error| error.to_string())?;
             engine.start().map_err(|error| error.to_string())?;
 
             let active = ActiveRecording {
@@ -286,13 +322,7 @@ impl RecordingController {
     }
 
     fn start(&self, preset: Preset) -> Result<String, String> {
-        {
-            let slot = self.lock_slot();
-            if slot.active.is_some() {
-                return Err("a recording is already running; stop it first".to_owned());
-            }
-        }
-        self.begin_operation()?;
+        self.reserve_start()?;
 
         let outcome = self.start_inner(preset);
         let mut slot = self.lock_slot();
@@ -417,6 +447,12 @@ struct AppState {
     _tray: tauri::tray::TrayIcon,
 }
 
+fn toggle_from_ui(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.controller.toggle_from_ui();
+    }
+}
+
 #[tauri::command]
 fn support_matrix() -> SupportFloors {
     SUPPORT_FLOORS.clone()
@@ -500,9 +536,7 @@ pub fn run() {
                 .on_menu_event(|app, event| {
                     let id = event.id().as_ref();
                     if id == TRAY_TOGGLE_ID {
-                        if let Some(state) = app.try_state::<AppState>() {
-                            let _ = state.controller.toggle();
-                        }
+                        toggle_from_ui(app);
                     } else if id == TRAY_QUIT_ID {
                         app.exit(0);
                     }
@@ -519,18 +553,24 @@ pub fn run() {
                 _tray: tray,
             });
 
-            app.handle().plugin(
-                ShortcutBuilder::new()
-                    .with_shortcut(HOTKEY_START_STOP)?
-                    .with_handler(|app, _shortcut, event| {
-                        if event.state == ShortcutState::Pressed {
-                            if let Some(state) = app.try_state::<AppState>() {
-                                let _ = state.controller.toggle();
-                            }
-                        }
-                    })
-                    .build(),
-            )?;
+            // A hotkey that cannot be registered must not take down the whole
+            // app: tray, window and HUD already work without it.
+            match ShortcutBuilder::new().with_shortcut(HOTKEY_START_STOP) {
+                Ok(builder) => {
+                    if let Err(error) = app.handle().plugin(
+                        builder
+                            .with_handler(|app, _shortcut, event| {
+                                if event.state == ShortcutState::Pressed {
+                                    toggle_from_ui(app);
+                                }
+                            })
+                            .build(),
+                    ) {
+                        eprintln!("global shortcut registration failed: {error}");
+                    }
+                }
+                Err(error) => eprintln!("global shortcut is invalid: {error}"),
+            }
             Ok(())
         })
         .run(app_context())
@@ -683,6 +723,48 @@ mod tests {
             "unexpected error: {error}"
         );
         assert!(!app.window_title().contains("REC"));
+    }
+
+    #[test]
+    fn idle_hud_matches_the_configured_hotkey_label() {
+        let expected = if cfg!(target_os = "macos") {
+            "Command+Shift+R"
+        } else {
+            "Ctrl+Shift+R"
+        };
+        assert_eq!(HOTKEY_START_STOP, "CommandOrControl+Shift+R");
+        let hud = view_for(None).hud;
+        assert!(
+            hud.contains(expected),
+            "idle HUD must show the platform hotkey: {hud}"
+        );
+    }
+
+    #[test]
+    fn ui_toggle_failure_is_published_to_the_hud() {
+        let dir = tempfile::tempdir().expect("a temporary data directory");
+        let app = TestApp::new(dir.path(), Box::new(FailingSourceFactory));
+        app.controller.toggle_from_ui();
+        let hud = app.hud_text();
+        assert!(
+            hud.contains("action failed") && hud.contains("audio device busy: fake failure"),
+            "a failed UI toggle must be visible in the HUD: {hud}"
+        );
+    }
+
+    #[test]
+    fn error_publication_preserves_the_active_recording() {
+        let dir = tempfile::tempdir().expect("a temporary data directory");
+        let app = TestApp::new(dir.path(), Box::new(FakeSourceFactory));
+        let id = app.call("start_recording", "lecture").unwrap();
+
+        app.controller.publish_error("probe failure");
+
+        let view = app.controller.view();
+        assert_eq!(view.session_id.as_deref(), Some(id.as_str()));
+        assert!(matches!(view.phase, ViewPhase::Recording));
+        assert!(view.hud.contains("probe failure"));
+        assert!(app.hud_text().contains("probe failure"));
     }
 
     #[test]

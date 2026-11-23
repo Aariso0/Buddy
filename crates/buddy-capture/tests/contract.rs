@@ -109,6 +109,8 @@ struct SourceHandle {
     reads: Arc<AtomicUsize>,
     reconnects: Arc<AtomicUsize>,
     pauses: Arc<AtomicUsize>,
+    closes: Arc<AtomicUsize>,
+    value: Arc<Mutex<f32>>,
 }
 
 impl SourceHandle {
@@ -126,6 +128,14 @@ impl SourceHandle {
 
     fn pauses(&self) -> usize {
         self.pauses.load(Ordering::SeqCst)
+    }
+
+    fn closes(&self) -> usize {
+        self.closes.load(Ordering::SeqCst)
+    }
+
+    fn set_value(&self, value: f32) {
+        *self.value.lock().unwrap() = value;
     }
 }
 
@@ -148,6 +158,12 @@ impl ControlledSource {
             reads: Arc::new(AtomicUsize::new(0)),
             reconnects: Arc::new(AtomicUsize::new(0)),
             pauses: Arc::new(AtomicUsize::new(0)),
+            closes: Arc::new(AtomicUsize::new(0)),
+            value: Arc::new(Mutex::new(if kind == TrackKind::System {
+                0.5
+            } else {
+                0.25
+            })),
         };
         (
             Self {
@@ -190,11 +206,7 @@ impl AudioSource for ControlledSource {
             return Err(error);
         }
         let count = (self.frames_total - self.position).min(out.len());
-        let value = if self.kind == TrackKind::System {
-            0.5
-        } else {
-            0.25
-        };
+        let value = *self.handle.value.lock().unwrap();
         out[..count].fill(value);
         out[count..].fill(0.0);
         self.position += count;
@@ -217,6 +229,7 @@ impl AudioSource for ControlledSource {
     }
 
     fn close(&mut self) -> Result<(), CaptureError> {
+        self.handle.closes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -262,6 +275,7 @@ fn engine_with(system: Vec<f32>, mic: Vec<f32>, session_dir: &Path) -> CaptureEn
         Box::new(FakeAudioSource::from_samples(TrackKind::Mic, 48_000, mic)),
         CaptureConfig::default(),
     )
+    .unwrap()
 }
 
 #[test]
@@ -296,7 +310,8 @@ fn pause_resume_keeps_monotonic_timeline() {
         )),
         Box::new(mic),
         CaptureConfig::default(),
-    );
+    )
+    .unwrap();
     engine.start().unwrap();
     engine.pause().unwrap();
     // Wait until the reader has actually applied pause, then capture the
@@ -305,21 +320,29 @@ fn pause_resume_keeps_monotonic_timeline() {
     let pause_boundary_ms = engine.elapsed_ms();
     handle.inject(CaptureError::DeviceLost("mic-after-resume".into()));
     engine.resume().unwrap();
+    // Only assert the boundary once the reader has really re-armed after the
+    // injected loss; stopping earlier can race with the gap being stamped.
+    wait_for(|| handle.reconnects() >= 1);
     engine.stop().unwrap();
 
     let gaps = read_gaps(&session_dir).unwrap();
-    let starts: Vec<u64> = gaps.iter().map(|g| g.start_ms).collect();
+    let loss_starts: Vec<u64> = gaps
+        .iter()
+        .filter(|gap| matches!(gap.reason, GapReason::DeviceLoss))
+        .map(|gap| gap.start_ms)
+        .collect();
     assert!(
-        !starts.is_empty(),
-        "the injected gap must actually be recorded"
+        !loss_starts.is_empty(),
+        "the injected device-loss gap must actually be recorded: {gaps:?}"
     );
     assert!(
-        starts
+        loss_starts
             .iter()
             .any(|&start| start >= pause_boundary_ms),
-        "a gap injected after resume must not be stamped before the pause boundary ({pause_boundary_ms}): {starts:?}"
+        "a DeviceLoss gap injected after resume must not be stamped before the pause boundary ({pause_boundary_ms}): {loss_starts:?}"
     );
-    assert!(starts.windows(2).all(|w| w[0] <= w[1]));
+    let all_starts: Vec<u64> = gaps.iter().map(|gap| gap.start_ms).collect();
+    assert!(all_starts.windows(2).all(|w| w[0] <= w[1]));
     assert!(read_chunk_index(&session_dir)
         .unwrap()
         .iter()
@@ -343,7 +366,8 @@ fn device_loss_records_gap_and_reconnects() {
         )),
         Box::new(mic),
         CaptureConfig::default(),
-    );
+    )
+    .unwrap();
     engine.start().unwrap();
     engine.stop().unwrap();
     let gaps = read_gaps(&session_dir).unwrap();
@@ -360,13 +384,18 @@ fn device_loss_records_gap_and_reconnects() {
 }
 
 #[test]
-fn overrun_records_gap_and_keeps_capturing() {
+fn overrun_records_gap_and_new_samples_reach_disk() {
     let dir = tempfile::tempdir().unwrap();
     let session_dir = session_dir_under(dir.path());
     let config = CaptureConfig {
         ring_frames: 8,
         ..CaptureConfig::default()
     };
+    // A short per-read delay keeps the overrun rate below the writer's gap
+    // drain rate; with no delay the 16k-slot gap queue overflows before the
+    // writer can publish the first marker.
+    let (mic, handle) =
+        ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::from_micros(250));
     let mut engine = CaptureEngine::new(
         SESSION_ID,
         &session_dir,
@@ -376,23 +405,39 @@ fn overrun_records_gap_and_keeps_capturing() {
             48_000,
             vec![0.5; 96_000],
         )),
-        Box::new(FakeAudioSource::from_samples(
-            TrackKind::Mic,
-            48_000,
-            vec![0.25; 96_000],
-        )),
+        Box::new(mic),
         config,
-    );
+    )
+    .unwrap();
     engine.start().unwrap();
+    // Wait for the published marker, not for a fixed sleep: the writer flushes
+    // gaps.jsonl as it drains them, so this is observable while capture runs.
+    wait_for(|| {
+        read_gaps(&session_dir)
+            .map(|gaps| gaps.iter().any(|g| matches!(g.reason, GapReason::Overrun)))
+            .unwrap_or(false)
+    });
+    // Switch to a distinguishable value only after the overrun is known, then
+    // let the reader push several more batches before stopping.
+    handle.set_value(0.75);
+    let reads_at_switch = handle.reads();
+    wait_for(|| handle.reads() >= reads_at_switch + 8);
     engine.stop().unwrap();
+
     assert!(read_gaps(&session_dir)
         .unwrap()
         .iter()
         .any(|g| matches!(g.reason, GapReason::Overrun)));
-    assert!(read_chunk_index(&session_dir)
+    let mic_samples: Vec<f32> = read_chunk_index(&session_dir)
         .unwrap()
-        .iter()
-        .all(|c| c.frames > 0));
+        .into_iter()
+        .filter(|chunk| chunk.track == TrackKind::Mic)
+        .flat_map(|chunk| read_chunk_samples(&session_dir, &chunk).unwrap())
+        .collect();
+    assert!(
+        mic_samples.iter().any(|&sample| sample == 0.75),
+        "samples captured after the overrun must reach disk: {mic_samples:?}"
+    );
 }
 
 #[test]
@@ -422,7 +467,8 @@ fn writer_preserves_samples_across_chunk_boundaries() {
             vec![0.25; 96_000],
         )),
         config,
-    );
+    )
+    .unwrap();
     engine.start().unwrap();
     engine.stop().unwrap();
 
@@ -456,7 +502,8 @@ fn gap_events_keep_per_event_timestamps() {
         )),
         Box::new(mic),
         CaptureConfig::default(),
-    );
+    )
+    .unwrap();
     engine.start().unwrap();
     wait_for(|| handle.reads() >= 1);
     for i in 0..3 {
@@ -504,7 +551,8 @@ fn generic_read_error_surfaces_from_stop_and_records_gap() {
         )),
         Box::new(mic),
         CaptureConfig::default(),
-    );
+    )
+    .unwrap();
     engine.start().unwrap();
     wait_for(|| handle.reads() >= 1);
     let result = engine.stop();
@@ -541,7 +589,8 @@ fn device_loss_reconnects_source_and_keeps_reading() {
         )),
         Box::new(mic),
         CaptureConfig::default(),
-    );
+    )
+    .unwrap();
     engine.start().unwrap();
     wait_for(|| handle.reconnects() >= 1);
     engine.stop().unwrap();
@@ -609,7 +658,8 @@ fn failed_stop_does_not_finalize_the_session() {
         )),
         Box::new(mic),
         CaptureConfig::default(),
-    );
+    )
+    .unwrap();
 
     engine.start().unwrap();
     wait_for(|| handle.reads() >= 1);
@@ -632,6 +682,73 @@ fn failed_stop_does_not_finalize_the_session() {
         recovery.manifest
     );
     assert!(recovery.needs_repair);
+}
+
+#[test]
+fn dropping_a_started_engine_closes_sources_without_finalizing() {
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
+    let sessions_root = dir.path().join("sessions");
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
+    let mut engine = CaptureEngine::new(
+        SESSION_ID,
+        &session_dir,
+        buddy_core::clock::SessionClock::new(),
+        Box::new(FakeAudioSource::from_samples(
+            TrackKind::System,
+            48_000,
+            vec![0.5; 96_000],
+        )),
+        Box::new(mic),
+        CaptureConfig::default(),
+    )
+    .unwrap();
+    engine.start().unwrap();
+    wait_for(|| handle.reads() >= 1);
+
+    drop(engine);
+
+    assert!(
+        handle.closes() >= 1,
+        "Drop must close the source owned by the reader thread"
+    );
+    let recovery = buddy_core::session::recover_session(&sessions_root, SESSION_ID).unwrap();
+    assert!(
+        matches!(
+            recovery.manifest.state,
+            buddy_core::session::SessionState::Recording
+        ),
+        "Drop is not a clean stop and must not complete the manifest"
+    );
+}
+
+#[test]
+fn session_dir_must_end_with_the_session_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let wrong_dir = dir.path().join("another-session");
+    let result = CaptureEngine::new(
+        SESSION_ID,
+        &wrong_dir,
+        buddy_core::clock::SessionClock::new(),
+        Box::new(FakeAudioSource::from_samples(
+            TrackKind::System,
+            48_000,
+            Vec::new(),
+        )),
+        Box::new(FakeAudioSource::from_samples(
+            TrackKind::Mic,
+            48_000,
+            Vec::new(),
+        )),
+        CaptureConfig::default(),
+    );
+    let error = result
+        .err()
+        .expect("a mismatched directory must be rejected");
+    assert!(
+        matches!(&error, CaptureError::Backend(message) if message.contains(SESSION_ID)),
+        "a mismatched directory must be rejected before any thread starts: {error}"
+    );
 }
 
 #[test]

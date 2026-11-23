@@ -101,7 +101,8 @@ fn sixty_minute_real_capture_has_two_gap_free_chunk_sequences() {
         Box::new(RealSource::open(SYSTEM_ID).expect("open real System endpoint")),
         Box::new(RealSource::open(MIC_ID).expect("open real Mic endpoint")),
         CaptureConfig::default(),
-    );
+    )
+    .expect("construct real capture engine");
     engine.start().expect("start real capture");
     std::thread::sleep(Duration::from_secs(SOAK_SECONDS));
     engine.stop().expect("stop real capture cleanly");

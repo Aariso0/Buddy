@@ -948,5 +948,7 @@ source-locations generator in .github/workflows/ci.yml is unchanged.
 macOS capture permission: `apps/desktop/src-tauri/Info.plist` supplies
 `NSAudioCaptureUsageDescription`, referenced explicitly by
 `bundle.macOS.infoPlist` in tauri.conf.json. Tauri also discovers that file by
-name. This satisfies the CoreAudio process-tap TCC requirement recorded above;
-it does not change the UNVERIFIED status of real macOS capture.
+name. This configures the required usage-description key; System Audio
+Recording still requires the user to grant permission before CoreAudio process
+taps can capture. It does not change the UNVERIFIED status of real macOS
+capture.

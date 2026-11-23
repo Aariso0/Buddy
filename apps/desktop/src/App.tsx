@@ -10,7 +10,10 @@ const INITIAL_VIEW: RecordingView = {
   phase: "idle",
   session_id: null,
   title: "Buddy",
-  hud: "system: idle · mic: idle · hotkey: Ctrl+Shift+R",
+  // The authoritative HUD text (including the platform hotkey) comes from the
+  // Rust snapshot on mount; keep this placeholder free of duplicated shortcut
+  // labels so macOS and other platforms never show a stale Ctrl hint.
+  hud: "system: idle · mic: idle",
 };
 
 const PHASE_LABEL = {
@@ -31,21 +34,30 @@ export default function App() {
   useEffect(() => {
     let active = true;
     let stopListening: (() => void) | undefined;
+    let sawStateEvent = false;
 
-    void invoke<RecordingView>("recording_state")
-      .then((state) => {
-        if (active) setView(state);
-      })
-      .catch((cause: unknown) => {
-        if (active) setError(String(cause));
-      });
-
+    // Subscribe first: a state change between the snapshot read and listener
+    // registration would otherwise be lost, and a late snapshot could overwrite
+    // a newer event.
     void listenRecordingState((next) => {
-      if (active) setView(next);
+      if (active) {
+        sawStateEvent = true;
+        setView(next);
+      }
     })
       .then((stop) => {
-        if (active) stopListening = stop;
-        else stop();
+        if (!active) {
+          stop();
+          return;
+        }
+        stopListening = stop;
+        void invoke<RecordingView>("recording_state")
+          .then((state) => {
+            if (active && !sawStateEvent) setView(state);
+          })
+          .catch((cause: unknown) => {
+            if (active) setError(String(cause));
+          });
       })
       .catch((cause: unknown) => {
         if (active) setError(String(cause));
@@ -76,8 +88,9 @@ export default function App() {
       await invoke(command, args);
       setView(await invoke<RecordingView>("recording_state"));
     } catch (cause) {
+      // Keep the last known view: a failed refresh must not make a live
+      // recording look idle just because the follow-up snapshot failed.
       setError(String(cause));
-      setView(await invoke<RecordingView>("recording_state").catch(() => INITIAL_VIEW));
     } finally {
       setBusy(false);
     }

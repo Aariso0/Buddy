@@ -336,6 +336,16 @@ jobs:
           mkdir -p "$XDG_RUNTIME_DIR"
           chmod 700 "$XDG_RUNTIME_DIR"
           pipewire &
+          # WirePlumber needs the native socket; start it only once PipeWire has
+          # created it, with a bounded wait so a dead graph fails this step.
+          for _ in $(seq 1 60); do
+            [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ] && break
+            sleep 1
+          done
+          if [ ! -S "${XDG_RUNTIME_DIR}/pipewire-0" ]; then
+            echo "PipeWire native socket did not appear in ${XDG_RUNTIME_DIR}" >&2
+            exit 1
+          fi
           wireplumber &
           pipewire-pulse &
           for _ in $(seq 1 60); do

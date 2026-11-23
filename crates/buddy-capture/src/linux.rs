@@ -33,7 +33,7 @@ const RING_FRAMES: usize = 8192;
 const SAMPLE_BATCH: usize = 512;
 const LOOP_TICK: Duration = Duration::from_millis(20);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
-// A live PipeWire graph delivers buffers every few milliseconds. Yielding for
+// A live PipeWire graph delivers buffers every few milliseconds. Waiting for
 // this long lets the producer catch up before read reports an empty source.
 const DATA_WAIT: Duration = Duration::from_secs(2);
 
@@ -549,13 +549,13 @@ impl AudioSource for PipeWireSource {
             return Ok(count);
         }
         // The engine reads as fast as it can and treats Ok(0) as exhaustion.
-        // Yielding lets the producer catch up without a lock, allocation or
-        // blocking I/O. A live source must never report exhaustion: a stalled
-        // graph is a typed Backend error so the engine records a gap instead
-        // of silently ending the track.
+        // A short sleep lets the producer catch up without a lock, allocation
+        // or a CPU-burning spin. A live source must never report exhaustion: a
+        // stalled graph is a typed Backend error so the engine records a gap
+        // instead of silently ending the track.
         let deadline = Instant::now() + self.data_wait;
         while Instant::now() < deadline {
-            std::thread::yield_now();
+            thread::sleep(Duration::from_millis(1));
             if self.state.load(Ordering::Acquire) != LIVE {
                 return Err(self.failure("PipeWire capture is no longer live"));
             }

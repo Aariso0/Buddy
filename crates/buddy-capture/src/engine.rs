@@ -203,11 +203,19 @@ impl CaptureEngine {
         system: Box<dyn AudioSource>,
         mic: Box<dyn AudioSource>,
         config: CaptureConfig,
-    ) -> Self {
+    ) -> Result<Self, CaptureError> {
+        // stop() finalizes using the id with this directory's parent, so a
+        // mismatched final component would complete a different session.
+        if session_dir.file_name().and_then(|name| name.to_str()) != Some(session_id) {
+            return Err(CaptureError::Backend(format!(
+                "session directory must end with session id {session_id}: {}",
+                session_dir.display()
+            )));
+        }
         let ring_frames = config.ring_frames;
         let channels = config.channels as usize;
         let ring = || Arc::new(RingBuffer::new(ring_frames, channels));
-        Self {
+        Ok(Self {
             session_id: session_id.to_owned(),
             session_dir: session_dir.to_owned(),
             config,
@@ -219,7 +227,7 @@ impl CaptureEngine {
             readers: Vec::new(),
             writer: None,
             started: false,
-        }
+        })
     }
 
     pub fn start(&mut self) -> Result<(), CaptureError> {
@@ -348,6 +356,32 @@ impl CaptureEngine {
     }
 }
 
+impl Drop for CaptureEngine {
+    fn drop(&mut self) {
+        // An abandoned engine must not leave capture threads spinning with the
+        // backend handles they own. Finalization stays in stop(): dropping the
+        // engine is not a clean stop, so the session manifest is untouched.
+        self.control.state.store(STOPPING, Ordering::Release);
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+        // Like stop(): only signal the writer once no reader can still publish
+        // samples or gaps during its shutdown drain.
+        self.control.writer_finish.store(true, Ordering::Release);
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+        // Sources not handed to a reader (engine dropped before start) still
+        // need their backend handles released.
+        if let Some(mut source) = self.system.take() {
+            let _ = source.close();
+        }
+        if let Some(mut source) = self.mic.take() {
+            let _ = source.close();
+        }
+    }
+}
+
 fn reader_loop(
     mut source: Box<dyn AudioSource>,
     ring: Arc<RingBuffer>,
@@ -436,11 +470,13 @@ fn publish_chunk(
     Ok(())
 }
 
+/// Drain pending gap events and return how many were published. The count lets
+/// the writer avoid exiting on the same pass that observed a new gap.
 fn drain_gaps(
     control: &Control,
     session_dir: &Path,
     clock: &SessionClock,
-) -> Result<(), CaptureError> {
+) -> Result<usize, CaptureError> {
     let mut events = Vec::new();
     for index in 0..2 {
         while let Some(event) = control.gap_queues[index].pop() {
@@ -451,6 +487,7 @@ fn drain_gaps(
     // events from different instants. Publish one pass in timestamp order to
     // keep gaps.jsonl globally monotonic.
     events.sort_by_key(|event| event.start_ms);
+    let count = events.len();
     for event in events {
         if event.track >= 2 {
             return Err(CaptureError::Backend("invalid gap track".to_owned()));
@@ -466,7 +503,7 @@ fn drain_gaps(
             },
         )?;
     }
-    Ok(())
+    Ok(count)
 }
 
 fn writer_loop(
@@ -488,6 +525,9 @@ fn writer_loop(
 
     loop {
         let mut drained = false;
+        // Observe the stop flag before draining either output queue so the
+        // final empty check covers everything published before completion.
+        let finishing = control.writer_finish.load(Ordering::Acquire);
         for index in 0..2 {
             while let Some(count) = rings[index].pop(&mut scratch) {
                 drained = true;
@@ -514,11 +554,14 @@ fn writer_loop(
                 }
             }
         }
-        if let Err(err) = drain_gaps(&control, &session_dir, &clock) {
-            record_error(&control.writer_error, err);
+        // Draining a gap defers the exit by one pass, so nothing published on
+        // this pass can be missed by an early break.
+        match drain_gaps(&control, &session_dir, &clock) {
+            Ok(count) => drained |= count > 0,
+            Err(err) => record_error(&control.writer_error, err),
         }
 
-        if control.writer_finish.load(Ordering::Acquire) && !drained {
+        if finishing && !drained {
             for index in 0..2 {
                 if !pending[index].is_empty() {
                     if let Err(err) = publish_chunk(
