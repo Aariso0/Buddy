@@ -535,14 +535,18 @@ impl AudioSource for WasapiSource {
 
         // The remembered id is used unchanged: `default` re-resolves the
         // current default endpoint, an explicit id names the same endpoint.
+        // Each worker generation owns its status cell. A timed-out setup
+        // leaves the old worker detached, so its later terminal store must not
+        // be observed as the replacement worker's status.
+        let state = Arc::new(AtomicU8::new(LIVE));
         let spec = StreamSpec {
             kind: self.kind.clone(),
             device_id: self.device_id.clone(),
             ring: Arc::clone(&self.ring),
             sample_rate: Arc::clone(&self.sample_rate),
-            state: Arc::clone(&self.state),
+            state: Arc::clone(&state),
         };
-        self.state.store(LIVE, Ordering::Release);
+        self.state = state;
         self.device_lost_error = Some(CaptureError::DeviceLost(
             "WASAPI endpoint was removed".to_owned(),
         ));

@@ -583,8 +583,10 @@ impl AudioSource for CoreAudioSource {
                     .unwrap_or_else(|| backend_error(String::new())));
             }
             // Never report Ok(0) as exhaustion for a live source, and never
-            // block in `read`: the worker is the only thread that waits.
-            std::thread::yield_now();
+            // block in `read`: the worker is the only thread that waits. A
+            // short sleep paces the poll so both readers are not left runnable
+            // between audio callbacks while the stall deadline still applies.
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -604,14 +606,18 @@ impl AudioSource for CoreAudioSource {
         // The remembered id is used unchanged: `default` re-resolves the
         // current CoreAudio process set or input device, an explicit id names
         // the same process or device.
+        // Each worker generation owns its status cell. A stop that times out
+        // detaches the worker, so its later terminal store must not overwrite
+        // the replacement worker's live status.
+        let state = Arc::new(AtomicU8::new(LIVE));
         let spec = StreamSpec {
             kind: self.kind.clone(),
             device_id: self.device_id.clone(),
             ring: Arc::clone(&self.ring),
             sample_rate: Arc::clone(&self.sample_rate),
-            state: Arc::clone(&self.state),
+            state: Arc::clone(&state),
         };
-        self.state.store(LIVE, Ordering::Release);
+        self.state = state;
         self.device_lost_error = Some(CaptureError::DeviceLost(
             "CoreAudio endpoint was removed".to_owned(),
         ));
