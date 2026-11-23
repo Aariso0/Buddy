@@ -3,7 +3,7 @@ use buddy_core::support::SUPPORT_FLOORS;
 
 #[test]
 fn support_floors_match_spec() {
-    assert_eq!(SUPPORT_FLOORS.windows_min, "10");
+    assert_eq!(SUPPORT_FLOORS.windows_min, "10 version 1703");
     assert_eq!(SUPPORT_FLOORS.macos_min, "14.2");
     assert!(SUPPORT_FLOORS.linux_requires_pipewire);
 }
@@ -62,6 +62,25 @@ fn failed_save_settings_removes_staging_file() {
         .filter(|name| name.starts_with("settings.json.") && name.ends_with(".tmp"))
         .collect();
     assert!(leftovers.is_empty(), "stale staging files: {leftovers:?}");
+}
+
+#[test]
+fn ensure_data_dir_precedes_save_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        data_dir: root.path().join("data").join("nested"),
+        log_level: "info".into(),
+    };
+    let sessions_root = ensure_data_dir(&settings).unwrap();
+    assert_eq!(sessions_root, settings.data_dir.join("sessions"));
+    assert!(sessions_root.is_dir());
+    // A second pass over an already prepared data dir must be harmless.
+    assert_eq!(ensure_data_dir(&settings).unwrap(), sessions_root);
+    save_settings(&settings.data_dir.join("settings.json"), &settings).unwrap();
+    assert_eq!(
+        load_settings(&settings.data_dir.join("settings.json")).unwrap(),
+        settings
+    );
 }
 
 #[test]

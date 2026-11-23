@@ -36,24 +36,24 @@ Verification after the fixes: `cargo fmt --all -- --check`, `cargo test --worksp
 | Session format v1 | Typed errors, UUID ids with traversal rejection, atomic temp → fsync → rename write, corrupt/truncated manifest handling, read/recover with `needs_repair`. |
 | Settings and support | `load_settings`/`save_settings` with typed errors and atomic writes; `SUPPORT_FLOORS` pinned to Windows 10, macOS 14.2 and PipeWire-only, with a regression test. |
 | CLI harness | `buddy-cli session new\|show\|recover` emitting the manifest or `{"needs_repair":…,"manifest":…}`, with a real-binary integration test. |
-| Desktop shell | Tauri 2 window titled `Buddy` (960×640), a `support_matrix()` command, generated icon set, `core:default`-only capability, and a compiled-config window test. The visible UI is deliberately the M0 placeholder; capture arrives in M1. |
-| CI and releases | `.github/workflows/ci.yml` tests PRs into `main` and pushes to `main` on Linux, Windows and macOS; a push publishing only when `apps/desktop/package.json` is newer than the latest `v*` tag. Unsigned NSIS `.exe`, `.dmg`, AppImage, `.deb`, `.rpm` and `.tar.gz`; release notes carry all required OS and unsigned-build warnings. No signing steps or signing secrets. |
+| Desktop shell | Tauri 2 window titled `Buddy` (960×640), a `support_matrix()` command, generated icon set, `core:default`-only capability, and a compiled-config window test. The visible UI was deliberately the M0 placeholder; M1 added the capture control surface and visible state. |
+| CI and releases | `.github/workflows/ci.yml` orchestrates PRs into `main` and pushes to `main` through reusable `ci-test.yml`, `ci-package.yml`, `ci-soak-linux.yml` and `ci-soak-windows.yml` jobs on Linux, Windows and macOS; shared setup lives in `.github/actions/setup-workspace` and the release/legal logic in `.github/scripts/`. A push publishes only when `apps/desktop/package.json` is newer than the latest `v*` tag. Unsigned NSIS `.exe`, `.dmg`, AppImage, `.deb`, `.rpm` and `.tar.gz`; release notes carry all required OS and unsigned-build warnings. No signing steps or signing secrets. |
 
 ## Decisions carried forward
 
 - Windows directory fsync after `rename` is `#[cfg(unix)]`-gated and best-effort; a committed write must never report failure.
 - Dependencies are pinned in both lockfiles and attributed in `NOTICE`, including MPL-2.0 `option-ext` via `dirs`.
-- `save_settings` assumes its parent directory exists; the first milestone that calls it must create the data directory.
-- `apps/desktop/package.json` is the version source of truth. `v0.1.0` does not exist yet, so the first qualifying merge to `main` publishes it.
-- Real-capture soaks on Arch Linux and Windows arrive with M1 capture code and must become dependencies of the `publish` job. Until then, the first CI release run is the real validation of bundle globs; failed uploads fail loudly via `if-no-files-found: error`.
-- macOS real capture is UNVERIFIED and must stay documented that way in release notes.
+- `save_settings` assumes its parent directory exists; the first milestone that calls it must create the data directory. **Resolved in M1:** the desktop shell calls `ensure_data_dir` before the first settings write or session creation.
+- `apps/desktop/package.json` is the version source of truth. No `v*` tag exists yet; the version is now `0.1.1` (bumped with M1), so the first qualifying merge to `main` publishes `v0.1.1`.
+- Real-capture soaks on Arch Linux and Windows arrive with M1 capture code and must become dependencies of the `publish` job. Until then, the first CI release run is the real validation of bundle globs; failed uploads fail loudly via `if-no-files-found: error`. **Delivered in M1:** `soak-linux` and `soak-windows` are now `publish.needs` dependencies; see `tests/soak/README.md`. They have not been run locally, so no pass is claimed.
+- macOS real capture is UNVERIFIED and must stay documented that way in release notes. **Still true after M1:** the release notes keep the statement "Real screen and audio capture has not been verified on macOS" verbatim.
 
 ## Session identity and creation semantics (binding for M1)
 
 - **Create versus resume:** `create_session` reserves the session directory exclusively. An id that already exists returns `SessionError::AlreadyExists` and leaves the existing manifest and all other state untouched. Resuming an interrupted session is a separate path through `read_session`/`recover_session`; creation never silently adopts or overwrites an existing session.
 - **Session identity rule:** the `id` stored in `session.json` must equal the id of the directory holding it. `read_session` and `recover_session` both return `SessionError::IdMismatch` when they differ; a mismatch is never silently repaired. Any future auto-repair or rename behaviour must be specified and approved before M1 writes real chunks.
-- Non-canonical UUID spellings may still produce an opaque Windows error; decide canonicalisation semantics before M1 writes real chunks.
-- A crash between directory reservation and manifest rename leaves an empty session directory: creation then returns `AlreadyExists` while read/recover return `Io(NotFound)`. Delete that directory manually until M1 defines repair; no committed manifest is ever lost.
+- Non-canonical UUID spellings may still produce an opaque Windows error; decide canonicalisation semantics before M1 writes real chunks. **Resolved in M1:** non-canonical ids are rejected with the typed `SessionError::InvalidSessionId`; no silent repair.
+- A crash between directory reservation and manifest rename leaves an empty session directory: creation then returns `AlreadyExists` while read/recover return `Io(NotFound)`. Delete that directory manually; no committed manifest is ever lost. **Confirmed in M1:** M1 deliberately does not adopt or auto-repair it (`empty_reserved_dir_is_not_adopted`).
 
 ## Deferred, non-blocking
 
@@ -65,4 +65,4 @@ Resolved during review fixes: session directories are now reserved exclusively; 
 
 ## Next milestone
 
-M1 adds real screen/audio capture. It needs its own plan before implementation. Start from `plan.md` §5/§7 and the approved design in `docs/specs/2026-11-22-mvp-branch-design.md`; keep the OS floors, unsigned-release rule, license verification, and offline/local-first constraints intact. Do not add network calls, accounts, telemetry, AI or sync code.
+M1 added real **audio** capture (screen/video capture is M3, out of scope for M1). Its approved plan and completion record are in [`docs/plans/2026-11-22-m1-audio-capture.md`](../plans/2026-11-22-m1-audio-capture.md). The next milestones are transcription (M2) and visual capture (M3); start from `plan.md` §5/§7 and the approved design in `docs/specs/2026-11-22-mvp-branch-design.md`; keep the OS floors, unsigned-release rule, license verification, and offline/local-first constraints intact. Do not add network calls, accounts, telemetry, AI or sync code before their milestones.

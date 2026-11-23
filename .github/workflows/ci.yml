@@ -2,6 +2,7 @@ name: CI
 
 # Development happens on `application`. This workflow only runs for PRs into `main`
 # and pushes to `main`; merging `application` into `main` is what produces a release.
+# Platform work lives in reusable workflows under .github/workflows/ci-*.yml.
 on:
   pull_request:
     branches: [main]
@@ -33,262 +34,77 @@ jobs:
           set -euo pipefail
           VERSION="$(node -p "JSON.parse(require('node:fs').readFileSync('apps/desktop/package.json', 'utf8')).version")"
           TAGS="$(git tag --list 'v*')"
-
-          # Semver precedence, not sort -V: a stable release outranks its own
-          # prereleases and numeric prerelease identifiers compare numerically.
-          RESULT="$(VERSION="$VERSION" TAGS="$TAGS" node -e '
-          // Compare digit strings exactly: Number loses precision above 2^53.
-          const cmpNum = (a, b) => a.length === b.length
-            ? (a < b ? -1 : a > b ? 1 : 0)
-            : (a.length < b.length ? -1 : 1);
-          const parse = (s) => {
-            const m = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/.exec(s);
-            if (!m) return null;
-            const pre = m[4] ? m[4].split(".") : [];
-            const build = m[5] ? m[5].split(".") : [];
-            // SemVer forbids empty identifiers and leading zeroes in numeric
-            // prerelease identifiers; invalid tags must not suppress a release.
-            if (build.some((id) => !id)) return null;
-            if (pre.some((id) => !id || (/^\d+$/.test(id) && id.length > 1 && id[0] === "0"))) return null;
-            return { n: [m[1], m[2], m[3]], p: pre };
-          };
-          const cmp = (a, b) => {
-            for (let i = 0; i < 3; i++) {
-              const order = cmpNum(a.n[i], b.n[i]);
-              if (order) return order;
-            }
-            if ((a.p.length === 0) !== (b.p.length === 0)) return a.p.length ? -1 : 1;
-            for (let i = 0; i < Math.min(a.p.length, b.p.length); i++) {
-              const x = a.p[i], y = b.p[i], xn = /^\d+$/.test(x), yn = /^\d+$/.test(y);
-              if (xn && yn) { const order = cmpNum(x, y); if (order) return order; }
-              else if (xn !== yn) return xn ? -1 : 1;
-              else if (x !== y) return x < y ? -1 : 1;
-            }
-            return Math.sign(a.p.length - b.p.length);
-          };
-          const version = parse(process.env.VERSION);
-          if (!version) throw new Error(`invalid package version: ${process.env.VERSION}`);
-          const entries = process.env.TAGS.split("\n")
-            .map((tag) => ({ tag: tag.trim(), value: parse(tag.trim()) }))
-            .filter((entry) => entry.value);
-          let latest = null;
-          for (const entry of entries) {
-            if (!latest || cmp(entry.value, latest.value) > 0) latest = entry;
-          }
-          console.log(`version=${process.env.VERSION}`);
-          console.log(`should_release=${!latest || cmp(version, latest.value) > 0}`);
-          console.log(`latest_tag=${latest ? latest.tag : "none"}`);
-          ')"
+          RESULT="$(VERSION="$VERSION" TAGS="$TAGS" node .github/scripts/decide-release.js)"
           echo "$RESULT" | grep -E '^(version|should_release)=' >> "$GITHUB_OUTPUT"
           echo "$RESULT"
 
   test-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-      - run: pnpm install --frozen-lockfile
-      - run: cargo fmt --all -- --check
-      - run: cargo test --workspace
-      - run: pnpm --filter @buddy/desktop build
+    name: test-linux
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      os: ubuntu-latest
 
   test-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: pnpm install --frozen-lockfile
-      - run: cargo fmt --all -- --check
-      - run: cargo test --workspace
-      - run: pnpm --filter @buddy/desktop build
+    name: test-windows
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      os: windows-latest
 
   test-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: pnpm install --frozen-lockfile
-      - run: cargo fmt --all -- --check
-      - run: cargo test --workspace
-      - run: pnpm --filter @buddy/desktop build
+    name: test-macos
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      os: macos-latest
 
   package-linux:
+    name: package-linux
     needs: [test-linux, test-windows, test-macos, prepare]
     if: github.event_name == 'push' && needs.prepare.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - name: Install Linux packaging dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf rpm
-      - run: pnpm install --frozen-lockfile
-      - name: Match Tauri config version to the release tag
-        env:
-          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          node -e "const fs = require('node:fs'); const p = 'apps/desktop/src-tauri/tauri.conf.json'; const c = JSON.parse(fs.readFileSync(p, 'utf8')); c.version = process.env.RELEASE_VERSION; fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');"
-      - name: Build Linux bundles
-        env:
-          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          pnpm --filter @buddy/desktop exec tauri build --bundles appimage,deb,rpm
-
-          # Stage the legal files inside the distributed archive. Adding bundle
-          # resources alone would not put them in the tar.gz we ship.
-          stage="$(mktemp -d)"
-          mkdir -p "$stage/legal"
-          # NOTICE requires the MPL text to accompany the distribution. Keep a
-          # copy in the repo: the MPL crates are not fetched on every target.
-          cp NOTICE LICENSE LICENSE-MPL-2.0.txt "$stage/legal/"
-
-          {
-            echo "# MPL-2.0 source locations for Buddy $RELEASE_VERSION"
-            echo
-            echo "This build contains MPL-2.0 licensed crates and packages. Their complete"
-            echo "corresponding source, at the exact versions below, is available from the"
-            echo "registry named in each entry."
-            echo
-            awk '
-              $3 == "MPL-2.0" && $2 ~ /^[0-9]/ {
-                printf "- %s %s: https://crates.io/api/v1/crates/%s/%s/download\n", $1, $2, $1, $2
-                next
-              }
-              $2 == "MPL-2.0" && $1 ~ /@[0-9]/ {
-                spec = $1
-                match(spec, /^.*@/)
-                name = substr(spec, 1, RLENGTH - 1)
-                version = substr(spec, RLENGTH + 1)
-                printf "- %s: https://registry.npmjs.org/%s/-/%s-%s.tgz\n", spec, name, name, version
-              }
-            ' NOTICE
-            echo
-            echo "cssparser, cssparser-macros and dtoa-short ship the MPL-2.0 text as LICENSE"
-            echo "in their crate sources; option-ext ships it as LICENSE.txt. The selectors"
-            echo "crates ship no license file, so their upstream notice is kept at"
-            echo "https://github.com/servo/servo/blob/main/LICENSE. The MPL-2.0 text is"
-            echo "staged beside this file as LICENSE-MPL-2.0.txt."
-          } > "$stage/legal/MPL-SOURCE-LOCATIONS.md"
-
-          tar czf buddy-linux-x86_64.tar.gz \
-            -C target/release buddy \
-            -C "$stage" legal
-      - uses: actions/upload-artifact@v4
-        with:
-          name: artifact-linux
-          path: |
-            target/release/bundle/appimage/*.AppImage
-            target/release/bundle/deb/*.deb
-            target/release/bundle/rpm/*.rpm
-            buddy-linux-x86_64.tar.gz
-          if-no-files-found: error
+    uses: ./.github/workflows/ci-package.yml
+    with:
+      os: ubuntu-latest
+      version: ${{ needs.prepare.outputs.version }}
+      bundles: appimage,deb,rpm
+      artifact-name: artifact-linux
+      linux-extra-packages: rpm
 
   package-windows:
+    name: package-windows
     needs: [test-linux, test-windows, test-macos, prepare]
     if: github.event_name == 'push' && needs.prepare.outputs.should_release == 'true'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: pnpm install --frozen-lockfile
-      - name: Match Tauri config version to the release tag
-        env:
-          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          node -e "const fs = require('node:fs'); const p = 'apps/desktop/src-tauri/tauri.conf.json'; const c = JSON.parse(fs.readFileSync(p, 'utf8')); c.version = process.env.RELEASE_VERSION; fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');"
-      - name: Build Windows bundles
-        run: pnpm --filter @buddy/desktop exec tauri build --bundles nsis
-      - uses: actions/upload-artifact@v4
-        with:
-          name: artifact-windows
-          path: target/release/bundle/nsis/*.exe
-          if-no-files-found: error
+    uses: ./.github/workflows/ci-package.yml
+    with:
+      os: windows-latest
+      version: ${{ needs.prepare.outputs.version }}
+      bundles: nsis
+      artifact-name: artifact-windows
 
   package-macos:
+    name: package-macos
     needs: [test-linux, test-windows, test-macos, prepare]
     if: github.event_name == 'push' && needs.prepare.outputs.should_release == 'true'
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: pnpm install --frozen-lockfile
-      - name: Match Tauri config version to the release tag
-        env:
-          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          node -e "const fs = require('node:fs'); const p = 'apps/desktop/src-tauri/tauri.conf.json'; const c = JSON.parse(fs.readFileSync(p, 'utf8')); c.version = process.env.RELEASE_VERSION; fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');"
-      - name: Build macOS bundles
-        run: pnpm --filter @buddy/desktop exec tauri build --bundles dmg
-      - uses: actions/upload-artifact@v4
-        with:
-          name: artifact-macos
-          path: target/release/bundle/dmg/*.dmg
-          if-no-files-found: error
+    uses: ./.github/workflows/ci-package.yml
+    with:
+      os: macos-latest
+      version: ${{ needs.prepare.outputs.version }}
+      bundles: dmg
+      artifact-name: artifact-macos
 
-  # M1 adds real-capture soak jobs (Arch Linux and Windows). When they land they must
-  # be dependencies of `publish` so a failed soak on either OS blocks publishing.
+  # Real-capture soaks. Both are dependencies of `publish`: a failed soak on
+  # either OS blocks the release. Each exports chunk counts and gap markers via
+  # an `if: always()` report step so a failure still carries those numbers.
+  soak-linux:
+    name: soak-linux
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/ci-soak-linux.yml
+
+  soak-windows:
+    name: soak-windows
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/ci-soak-windows.yml
+
   publish:
-    needs: [prepare, package-linux, package-windows, package-macos]
+    needs: [prepare, package-linux, package-windows, package-macos, soak-linux, soak-windows]
     if: github.event_name == 'push' && needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:

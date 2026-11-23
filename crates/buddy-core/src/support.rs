@@ -10,7 +10,7 @@ pub struct SupportFloors {
 }
 
 pub const SUPPORT_FLOORS: SupportFloors = SupportFloors {
-    windows_min: "10",
+    windows_min: "10 version 1703",
     macos_min: "14.2",
     linux_requires_pipewire: true,
 };

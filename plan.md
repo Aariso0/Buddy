@@ -1,6 +1,6 @@
 # Buddy: Project Plan (v2)
 
-> Status: planning. Refined from `Buddy_Project_Plan.md` after a requirements interview (2026-11-21).
+> Status: active development. M0 (Foundation) and M1 (Audio capture) are implemented and reviewed on branch `M1/Audio_Capture`; see [`docs/specs/2026-11-22-m0-completion.md`](docs/specs/2026-11-22-m0-completion.md) and [`docs/plans/2026-11-22-m1-audio-capture.md`](docs/plans/2026-11-22-m1-audio-capture.md). The remaining milestones below are plans, not shipped code. Refined from `Buddy_Project_Plan.md` after a requirements interview (2026-11-21).
 > Items marked **(verify)** are beliefs that have not been checked against current docs or hardware. Each has a validation spike in section 19.
 
 ---

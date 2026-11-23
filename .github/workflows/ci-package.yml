@@ -1,0 +1,82 @@
+name: CI - package
+
+# Reusable packaging job. The top-level ci.yml supplies the OS, release
+# version, bundle set and artifact name; platform-specific steps stay here.
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: Runner label for this platform
+        required: true
+        type: string
+      version:
+        description: Version to write into tauri.conf.json
+        required: true
+        type: string
+      bundles:
+        description: Comma-separated Tauri bundle list
+        required: true
+        type: string
+      artifact-name:
+        description: Uploaded artifact name
+        required: true
+        type: string
+      linux-extra-packages:
+        description: Extra apt packages for Linux packaging (for example rpm)
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: package (${{ inputs.os }})
+    runs-on: ${{ inputs.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-workspace
+        with:
+          install-linux-deps: ${{ inputs.os == 'ubuntu-latest' }}
+          linux-extra-packages: ${{ inputs['linux-extra-packages'] }}
+      - name: Match Tauri config version to the release tag
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          node -e "const fs = require('node:fs'); const p = 'apps/desktop/src-tauri/tauri.conf.json'; const c = JSON.parse(fs.readFileSync(p, 'utf8')); c.version = process.env.RELEASE_VERSION; fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');"
+      - name: Build Linux bundles and legal archive
+        if: ${{ inputs.os == 'ubuntu-latest' }}
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: bash .github/scripts/stage-legal.sh
+      - name: Build Windows bundles
+        if: ${{ inputs.os == 'windows-latest' }}
+        run: pnpm --filter @buddy/desktop exec tauri build --bundles ${{ inputs.bundles }}
+      - name: Build macOS bundles
+        if: ${{ inputs.os == 'macos-latest' }}
+        run: pnpm --filter @buddy/desktop exec tauri build --bundles ${{ inputs.bundles }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.os == 'ubuntu-latest' }}
+        with:
+          name: ${{ inputs['artifact-name'] }}
+          path: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
+            buddy-linux-x86_64.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.os == 'windows-latest' }}
+        with:
+          name: ${{ inputs['artifact-name'] }}
+          path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.os == 'macos-latest' }}
+        with:
+          name: ${{ inputs['artifact-name'] }}
+          path: target/release/bundle/dmg/*.dmg
+          if-no-files-found: error

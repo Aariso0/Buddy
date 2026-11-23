@@ -113,8 +113,8 @@ Notes on multi-license entries:
   - thiserror and thiserror-impl appear twice: 1.0.69 is used directly by
     buddy-core, and 2.0.21 is a transitive dependency of redox_users (a
     Redox-target-only dependency of dirs-sys). Both are MIT OR Apache-2.0.
-  - The three workspace crates (buddy-core, buddy-cli, buddy-desktop) are
-    first-party Apache-2.0 and are not listed here.
+  - The four workspace crates (buddy-core, buddy-capture, buddy-cli,
+    buddy-desktop) are first-party Apache-2.0 and are not listed here.
    - The fifteen crates added for the CLI harness (anstream, anstyle,
      anstyle-parse, anstyle-query, anstyle-wincon, clap, clap_builder,
      clap_derive, clap_lex, colorchoice, heck, is_terminal_polyfill,
@@ -229,6 +229,7 @@ were also checked against the crates.io API.
   gdkx11 0.18.2                                   MIT
   gdkx11-sys 0.18.2                               MIT
   generic-array 0.14.7                            MIT
+  gethostname 1.1.0                               Apache-2.0
   getrandom 0.3.4                                 MIT OR Apache-2.0
   gio 0.18.4                                      MIT
   gio-sys 0.18.1                                  MIT
@@ -236,6 +237,7 @@ were also checked against the crates.io API.
   glib-macros 0.18.5                              MIT
   glib-sys 0.18.1                                 MIT
   glob 0.3.4                                      MIT OR Apache-2.0
+  global-hotkey 0.8.0                             Apache-2.0 OR MIT
   gobject-sys 0.18.0                              MIT
   gtk 0.18.2                                      MIT
   gtk-sys 0.18.2                                  MIT
@@ -286,6 +288,7 @@ were also checked against the crates.io API.
   jni-sys-macros 0.4.1                            MIT OR Apache-2.0
   json-patch 4.2.0                                MIT/Apache-2.0
   jsonptr 0.7.1                                   MIT OR Apache-2.0
+  keyboard-types 0.7.0                            MIT OR Apache-2.0
   keyboard-types 0.8.3                            MIT OR Apache-2.0
   libappindicator 0.9.0                           Apache-2.0 OR MIT
   libappindicator-sys 0.9.0                       Apache-2.0 OR MIT
@@ -413,6 +416,8 @@ were also checked against the crates.io API.
   tauri-build 2.7.6                               Apache-2.0 OR MIT
   tauri-codegen 2.7.6                             Apache-2.0 OR MIT
   tauri-macros 2.7.6                              Apache-2.0 OR MIT
+  tauri-plugin 2.7.4                              Apache-2.0 OR MIT
+  tauri-plugin-global-shortcut 2.4.1              Apache-2.0 OR MIT
   tauri-runtime 2.12.4                            Apache-2.0 OR MIT
   tauri-runtime-wry 2.12.5                        Apache-2.0 OR MIT
   tauri-utils 2.10.4                              Apache-2.0 OR MIT
@@ -478,16 +483,26 @@ were also checked against the crates.io API.
   windows-future 0.3.2                            MIT OR Apache-2.0
   windows-numerics 0.3.1                          MIT OR Apache-2.0
   windows-sys 0.45.0                              MIT OR Apache-2.0
+  windows-sys 0.59.0                              MIT OR Apache-2.0
   windows-targets 0.42.2                          MIT OR Apache-2.0
+  windows-targets 0.52.6                          MIT OR Apache-2.0
   windows-threading 0.2.1                         MIT OR Apache-2.0
   windows-version 0.1.7                           MIT OR Apache-2.0
   windows_aarch64_gnullvm 0.42.2                  MIT OR Apache-2.0
+  windows_aarch64_gnullvm 0.52.6                  MIT OR Apache-2.0
   windows_aarch64_msvc 0.42.2                     MIT OR Apache-2.0
+  windows_aarch64_msvc 0.52.6                     MIT OR Apache-2.0
   windows_i686_gnu 0.42.2                         MIT OR Apache-2.0
+  windows_i686_gnu 0.52.6                         MIT OR Apache-2.0
+  windows_i686_gnullvm 0.52.6                     MIT OR Apache-2.0
   windows_i686_msvc 0.42.2                        MIT OR Apache-2.0
+  windows_i686_msvc 0.52.6                        MIT OR Apache-2.0
   windows_x86_64_gnu 0.42.2                       MIT OR Apache-2.0
+  windows_x86_64_gnu 0.52.6                       MIT OR Apache-2.0
   windows_x86_64_gnullvm 0.42.2                   MIT OR Apache-2.0
+  windows_x86_64_gnullvm 0.52.6                   MIT OR Apache-2.0
   windows_x86_64_msvc 0.42.2                      MIT OR Apache-2.0
+  windows_x86_64_msvc 0.52.6                      MIT OR Apache-2.0
   winnow 0.5.40                                   MIT
   winnow 1.0.5                                    MIT
   winreg 0.56.0                                   MIT
@@ -496,6 +511,9 @@ were also checked against the crates.io API.
   wry 0.57.3                                      Apache-2.0 OR MIT
   x11 2.21.0                                      MIT
   x11-dl 2.21.0                                   MIT
+  x11rb 0.13.2                                    MIT OR Apache-2.0
+  x11rb-protocol 0.13.2                           MIT OR Apache-2.0
+  xkeysym 0.2.1                                   MIT OR Apache-2.0 OR Zlib
   yoke 0.8.4                                      Unicode-3.0
   yoke-derive 0.8.4                               Unicode-3.0
   zerofrom 0.1.8                                  Unicode-3.0
@@ -635,3 +653,302 @@ pnpm store; all sources agreed.
   - picocolors 1.1.1 is ISC, source-map-js 1.2.4 is BSD-3-Clause and tslib
     2.9.1 is 0BSD; all three are permissive licenses that retain their
     copyright notices.
+
+Linux PipeWire backend dependencies (Task 4)
+--------------------------------------------
+
+License spike result: the chosen binding is the upstream `pipewire` crate,
+pinned to exactly 0.10.1 in crates/buddy-capture/Cargo.toml. It is maintained
+by the PipeWire project itself (repository
+https://gitlab.freedesktop.org/pipewire/pipewire-rs, homepage https://pipewire.org);
+version 0.10.1 was published 2026-08-19, with earlier 0.10.0, 0.9.x and 0.8.x
+releases in the same series. Sources checked: the crates.io API record for
+`pipewire` 0.10.1 (license field `MIT`, checksum
+bde71084c4e25959d68f1ea54daa75e5ecdb338e5caf0b5510143b79baa32d5c), the
+published crate source on docs.rs (Cargo.toml `license = "MIT"`, LICENSE file
+containing the MIT text reproduced below, README and examples) and the
+published crate sources in the local Cargo registry cache. No PulseAudio or
+ALSA fallback exists: the crate links directly to libpipewire through
+`pipewire-sys` and to libspa through `libspa-sys`. Sink-monitor capture is an
+explicit supported mode in the upstream 0.10.1 `audio-capture` example:
+insert `*pw::keys::STREAM_CAPTURE_SINK => "true"` into the stream properties,
+then connect an Input stream with AUTOCONNECT so PipeWire attaches it to the
+default sink's monitor ports. The "default" source is the same Input stream
+without that property.
+
+    Copyright The pipewire-rs Contributors.
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice (including the next
+    paragraph) shall be included in all copies or substantial portions of the
+    Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+The new locked crates below were each checked against the exact published
+crate source Cargo.toml in the local Cargo registry cache; crates.io API
+records agreed for every entry reachable during the spike (clang-sys 1.9.1 and
+nom 8.0.0 timed out on the API and were confirmed from their published
+manifests only). None is MPL-2.0, so no source-location entry is added to the
+MPL generator in .github/scripts/stage-legal.sh.
+
+  annotate-snippets 0.11.5                     MIT OR Apache-2.0
+  bindgen 0.72.1                               BSD-3-Clause
+  cexpr 0.6.0                                  Apache-2.0/MIT
+  cfg-expr 0.20.11                             MIT OR Apache-2.0
+  clang-sys 1.9.1                              Apache-2.0
+  cookie-factory 0.3.3                         MIT
+  either 1.19.0                                MIT OR Apache-2.0
+  itertools 0.13.0                             MIT OR Apache-2.0
+  libloading 0.8.9                             ISC
+  libspa 0.10.1                                MIT
+  libspa-sys 0.10.1                            MIT
+  minimal-lexical 0.2.1                        MIT/Apache-2.0
+  nom 7.1.3                                    MIT
+  nom 8.0.0                                    MIT
+  pipewire 0.10.1                              MIT
+  pipewire-sys 0.10.1                          MIT
+  shlex 1.3.0                                  MIT OR Apache-2.0
+  system-deps 7.0.8                            MIT OR Apache-2.0
+  target-lexicon 0.13.5                        Apache-2.0 WITH LLVM-exception
+  unicode-width 0.2.3                          MIT OR Apache-2.0
+
+Notes on Linux PipeWire dependency licenses:
+  - pipewire, pipewire-sys, libspa and libspa-sys 0.10.1 are all MIT from the
+    same upstream project; keep their MIT notice with any distribution that
+    links libpipewire.
+  - bindgen 0.72.1 is BSD-3-Clause, clang-sys 1.9.1 is Apache-2.0 and
+    libloading 0.8.9 and target-lexicon 0.13.5 are permissive; all are
+    build-time dependencies of the FFI crates and retain their notices.
+  - shlex 1.3.0, system-deps 7.0.8, target-lexicon 0.13.5 and libloading
+    0.8.9 are new versions of names already listed above; both versions are
+    recorded where the lockfile pins both.
+
+Windows WASAPI backend dependencies (M1 S2)
+-------------------------------------------
+
+License/capability spike result: the chosen binding is the upstream `wasapi`
+crate, pinned to exactly 0.27.0 in crates/buddy-capture/Cargo.toml. It is
+maintained by HEnquist (repository https://github.com/HEnquist/wasapi-rs);
+version 0.27.0 was published 2026-11-06, the repository had commits as recent
+as 2026-11-19, and the crate has 29 published versions. Sources checked: the
+crates.io API record for `wasapi` 0.27.0 (license `MIT`, rust-version 1.85,
+checksum 58b35dbcb6fae6fbaba9f6f52a22686bb405978ee112ed6eb33d98bd63c97583),
+the docs.rs 0.27.0 page (MIT, x86_64-pc-windows-msvc), the published crate
+source downloaded from crates.io (Cargo.toml.orig `license = "MIT"`,
+LICENSE.txt, README.md, examples/record.rs and the device-backed error tests),
+the upstream repository README/examples/commits, and the Microsoft "Loopback
+Recording" and "Exclusive-Mode Streams" documents.
+
+The published README lists "Loopback capture" and shared/exclusive modes.
+Upstream 0.27.0 sets `AUDCLNT_STREAMFLAGS_LOOPBACK` when an `AudioClient` from a
+render endpoint is initialised with `Direction::Capture` in shared mode, and
+returns `WasapiError::LoopbackWithExclusiveMode` for the exclusive-mode
+combination. Microsoft's loopback document confirms that loopback works without
+a virtual cable (it uses a hardware loopback pin when present, otherwise copies
+the audio-engine output), that it is shared-mode only, and that event-driven
+loopback clients are supported on Windows 10 version 1703 and later. Buddy's
+System track therefore opens the default render endpoint in shared loopback
+mode; the Mic track opens the default capture endpoint. No virtual loopback
+device is installed or required. Exclusive-mode limitation: an application that
+holds an endpoint exclusively seizes it and silences other applications; a
+shared-mode loopback stream cannot capture that application's audio.
+
+The exact MIT text from wasapi 0.27.0's LICENSE.txt is reproduced here:
+
+    Copyright (c) 2020 Henrik Enquist
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+New locked crate:
+
+   num-integer 0.1.47                            MIT OR Apache-2.0
+
+Notes on Windows WASAPI dependency licenses:
+   - wasapi 0.27.0 is MIT. Keep the notice above with any Windows distribution
+     that includes it.
+   - num-integer 0.1.47 is MIT OR Apache-2.0 and is used under MIT terms. Its
+     dependency num-traits 0.2.19, plus log 0.4.35, thiserror 2.0.21, windows
+     0.62.2 and windows-core 0.62.2, were already listed above.
+   - No MPL-2.0 crate is introduced by this backend, so the exact-version
+     source-locations generator in .github/scripts/stage-legal.sh is unchanged.
+
+macOS audio backends (M1 S1)
+----------------------------
+
+Capability/license spike result: a viable native system-audio path exists on
+macOS 14.2+ and does NOT require a virtual loopback device. Two upstream paths
+were checked against Apple's own documentation:
+
+  1. ScreenCaptureKit audio. Apple's DocC data for
+     `SCStreamConfiguration.capturesAudio` states "A Boolean value that indicates
+     whether to capture audio", that streams do not capture audio by default,
+     and an availability floor of macOS 13.0. The Rust binding
+     `screencapturekit` is maintained by doom-fish
+     (https://github.com/doom-fish/screencapturekit-rs); crates.io API records
+     version 12.0.0 published 2026-11-21, checksum
+     b5f891b0db00740f80bf876cfb83ae67c1484924be9cbf9d1b4aee87b1511108, license
+     `MIT OR Apache-2.0`, rust-version 1.82. Its README documents system audio
+     capture from macOS 13.0+ but microphone capture only from macOS 15.0+,
+     which is above Buddy's committed macOS 14.2 floor, so this crate is NOT
+     adopted. It is recorded here as evidence that a virtual device is unneeded.
+
+  2. CoreAudio process taps. Apple's DocC metadata for
+     `AudioHardwareCreateProcessTap` records `introducedAt: 14.2` for macOS.
+     Apple's "Capturing system audio with Core Audio taps" sample
+     (developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps)
+     says "ensure that you're using macOS 14.2 or later", creates a tap with
+     `AudioHardwareCreateProcessTap` and reads it through a HAL aggregate device.
+     It requires the `NSAudioCaptureUsageDescription` Info.plist key and the
+     user's System Audio Recording permission, and explicitly needs no virtual
+     audio device. Apple's CoreAudio framework ships with macOS; there is no
+     third-party runtime licence to attribute for the framework itself.
+
+Chosen binding: the upstream `coreaudio` crate, pinned to exactly 0.6.2 in
+crates/buddy-capture/Cargo.toml with its `process-tap` feature. It is maintained
+by Keegan Wilgermein (https://github.com/Keegan-Wilgermein/coreaudio). Sources
+checked: the crates.io API record for `coreaudio` 0.6.2 (license `MIT`,
+checksum 44f8d03f64a1e3a4fc093b793351ee901bceb52ee82a139072a808c2d4fec4bb,
+published 2026-10-21), the docs.rs 0.6.2 page (MIT, edition 2024), the published
+crate source Cargo.toml, LICENSE and README (which document `ProcessTap`,
+`AppTapAggregateDevice`, `IOProc` and the macOS 14.2+ floor), and Apple's
+process-tap and ScreenCaptureKit documentation. The crate taps all CoreAudio
+processes for `TrackKind::System` and opens the default input device for
+`TrackKind::Mic`. Tapping needs the System Audio Recording TCC grant; without
+it the tap is created but delivers silence, so the desktop shell must add
+`NSAudioCaptureUsageDescription` before a real-capture attempt can succeed.
+
+The exact MIT text from coreaudio 0.6.2's LICENSE is reproduced here:
+
+    MIT License
+
+    Copyright (c) 2026 Keegan Wilgermein
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+The locked crates added by this binding are each attributed below; their exact
+SPDX identifiers were cross-checked against the published crate sources and,
+where reachable, the crates.io API. None is MPL-2.0, so the exact-version
+source-locations generator in .github/scripts/stage-legal.sh is unchanged.
+
+   coreaudio 0.6.2                                  MIT
+   objc2-audio-toolbox 0.3.2                        Zlib OR Apache-2.0 OR MIT
+   objc2-core-audio 0.3.2                           Zlib OR Apache-2.0 OR MIT
+   objc2-core-audio-types 0.3.2                     Zlib OR Apache-2.0 OR MIT
+
+Notes on macOS dependency licenses:
+   - coreaudio 0.6.2 is MIT; keep the notice above with any macOS distribution
+     that includes it.
+   - The three objc2-* bindings are generated from Apple's CoreAudio headers by
+     the objc2 project and are all Zlib OR Apache-2.0 OR MIT; Buddy uses them
+     under MIT terms. Their dependencies core-foundation 0.10.1,
+     objc2 0.6.5, objc2-encode 4.1.0 and objc2-foundation 0.3.2 were already
+     listed above.
+   - A cross-target `cargo check --target x86_64-apple-darwin --all-targets`
+     with the official Rust 1.100.0 toolchain passes for this backend and its
+     contract tests. That checks types only: no macOS linking, no macOS test
+     execution and no real capture was possible on this Linux host. Real
+     capture therefore stays UNVERIFIED and the release-note statement
+     "Real screen and audio capture has not been verified on macOS" is kept
+     verbatim.
+
+Desktop control surface (M1 Task 7)
+-----------------------------------
+
+Tray control uses Tauri's built-in `tauri::tray::TrayIconBuilder`, enabled by the
+`tray-icon` feature on the already-attributed `tauri` 2.12.7. No tray plugin was
+adopted: `tauri-plugin-tray` returns HTTP 404 from crates.io. The `tray-icon`
+0.25.1 crate it enables is already listed above; no new dependency is needed.
+
+The global start/stop hotkey uses the official `tauri-plugin-global-shortcut`,
+pinned to exactly 2.4.1 in apps/desktop/src-tauri/Cargo.toml. Spike evidence
+checked before adoption:
+
+  - crates.io API https://crates.io/api/v1/crates/tauri-plugin-global-shortcut/2.4.1:
+    license `Apache-2.0 OR MIT`, checksum
+    93ff17919fe09852d269bd37b1d3d2e993b9dbb514afe7acbf3346c1d3627e2d,
+    published 2026-10-10T16:54:51.613172Z, rust-version 1.90, not yanked.
+  - The exact published source archive was downloaded and read: `LICENSE.spdx`,
+    `LICENSE_APACHE-2.0`, `LICENSE_MIT`, `README.md`, `src/lib.rs` and
+    `permissions/default.toml` (which grants no permissions). Rust source files
+    carry both SPDX headers `Apache-2.0` and `MIT`.
+  - Repository https://github.com/tauri-apps/plugins-workspace showed commits on
+    2026-11-20, so the plugin is maintained. Its `global-hotkey` dependency's
+    repository showed activity on 2026-11-09.
+  - The plugin registers OS-level shortcuts through `global-hotkey`; it performs
+    no network access and sends no telemetry. Its behaviour is entirely local.
+  - The Rust-only `Builder::new().with_shortcut(...).with_handler(...)` API was
+    used, so no npm `@tauri-apps/plugin-global-shortcut` binding was added.
+
+Exact versions and SPDX identifiers of the newly locked crates, each taken from
+its crates.io API record and cross-checked against the published crate source:
+
+    tauri-plugin-global-shortcut 2.4.1              Apache-2.0 OR MIT
+    tauri-plugin 2.7.4                             Apache-2.0 OR MIT
+    global-hotkey 0.8.0                            Apache-2.0 OR MIT
+    keyboard-types 0.7.0                           MIT OR Apache-2.0
+    gethostname 1.1.0                              Apache-2.0
+    x11rb 0.13.2                                   MIT OR Apache-2.0
+    x11rb-protocol 0.13.2                          MIT OR Apache-2.0
+    xkeysym 0.2.1                                  MIT OR Apache-2.0 OR Zlib
+    windows-sys 0.59.0                             MIT OR Apache-2.0
+    windows-targets 0.52.6                         MIT OR Apache-2.0
+    windows_* 0.52.6 (all eight target crates)     MIT OR Apache-2.0
+
+The second `keyboard-types 0.7.0` is required by `global-hotkey`; `keyboard-types`
+0.8.3 remains in use by `tauri`. The `windows-*` 0.52.6 family is pulled in only
+by `global-hotkey`'s Windows target dependency; the existing 0.42.2 family is
+unchanged. None of the new crates is MPL-2.0, so the exact-version
+source-locations generator in .github/scripts/stage-legal.sh is unchanged.
+
+macOS capture permission: `apps/desktop/src-tauri/Info.plist` supplies
+`NSAudioCaptureUsageDescription`, referenced explicitly by
+`bundle.macOS.infoPlist` in tauri.conf.json. Tauri also discovers that file by
+name. This configures the required usage-description key; System Audio
+Recording still requires the user to grant permission before CoreAudio process
+taps can capture. It does not change the UNVERIFIED status of real macOS
+capture.
