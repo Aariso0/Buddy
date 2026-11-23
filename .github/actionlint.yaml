@@ -1,6 +1,1 @@
-self-hosted-runner:
-  # Labels of the Windows audio-soak runner declared in ci-soak-windows.yml.
-  labels:
-    - buddy-audio-soak
-
 config-variables: null

@@ -71,25 +71,29 @@ BUDDY_AUDIO_SOAK=1 cargo test -p buddy-capture --test linux_pipewire -- --nocapt
 BUDDY_AUDIO_SOAK=1 cargo test -p buddy-capture --test soak_real -- --ignored --nocapture
 ```
 
-## Windows (WASAPI loopback, self-hosted)
+## Windows (WASAPI loopback, local only)
 
-CI job `soak-windows` runs on a **self-hosted** runner with labels
-`self-hosted`, `windows` and `buddy-audio-soak`. GitHub-hosted Windows runners
-have no audio endpoint, and the runner-images maintainers do not pre-install
-virtual hardware, so this job must not be moved to `windows-latest`. The
-runner must have:
+The Windows soak is **disabled in CI** and no longer gates `publish`. Hosted
+Windows runners have no audio endpoints; a runtime-installed virtual driver can
+supply a render endpoint for WASAPI loopback, but not the capture endpoint that
+`soak_real.rs` requires for the Mic track. A second virtual device would mean a
+commercial driver with no clean silent-install path on disposable runners. No
+self-hosted `buddy-audio-soak` runner is registered either, so the job only
+queued. Windows real-capture behavior is therefore UNVERIFIED in CI.
+
+The procedure remains available for a local machine with:
 
 - a real default **render** endpoint (WASAPI loopback captures its mix), and
 - a real default **capture** endpoint for the Mic track.
 
 No virtual audio device is installed or required by Buddy or by its users. The
-job writes a 10-second 440 Hz 48 kHz 16-bit mono WAV with PowerShell's `BinaryWriter`,
-plays it to the default render endpoint with `System.Media.SoundPlayer.PlayLooping()`
-(so the loop supplies a signal for the full hour), sets `BUDDY_AUDIO_SOAK=1`,
-and runs the two WASAPI integration tests (`windows_wasapi.rs`),
-`windows::tests::*` and the ignored soak test. The player is stopped and
-disposed in `finally` so a failed test never leaves tone playing. To reproduce
-locally on such a machine, mirror the CI script:
+script writes a 10-second 440 Hz 48 kHz 16-bit mono WAV with PowerShell's
+`BinaryWriter`, plays it to the default render endpoint with
+`System.Media.SoundPlayer.PlayLooping()` (so the loop supplies a signal for the
+full hour), sets `BUDDY_AUDIO_SOAK=1`, and runs the two WASAPI integration tests
+(`windows_wasapi.rs`), `windows::tests::*` and the ignored soak test. The player
+is stopped and disposed in `finally` so a failed test never leaves tone playing.
+To reproduce locally on such a machine:
 
 ```powershell
 $ErrorActionPreference = 'Stop'

@@ -90,21 +90,17 @@ jobs:
       bundles: dmg
       artifact-name: artifact-macos
 
-  # Real-capture soaks. Both are dependencies of `publish`: a failed soak on
-  # either OS blocks the release. Each exports chunk counts and gap markers via
-  # an `if: always()` report step so a failure still carries those numbers.
+  # Real-capture soak. A failed soak blocks the release, and the report step
+  # exports chunk counts and gap markers even when the soak fails. The Windows
+  # soak is disabled: hosted Windows runners cannot provide the capture endpoint
+  # the Mic track needs, and no self-hosted audio-soak runner is registered.
   soak-linux:
     name: soak-linux
     if: github.event_name == 'push'
     uses: ./.github/workflows/ci-soak-linux.yml
 
-  soak-windows:
-    name: soak-windows
-    if: github.event_name == 'push'
-    uses: ./.github/workflows/ci-soak-windows.yml
-
   publish:
-    needs: [prepare, package-linux, package-windows, package-macos, soak-linux, soak-windows]
+    needs: [prepare, package-linux, package-windows, package-macos, soak-linux]
     if: github.event_name == 'push' && needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:

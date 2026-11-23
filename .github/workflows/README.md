@@ -10,7 +10,11 @@ workflows so one runner can change without touching the others.
 | `ci-test.yml` | `cargo fmt`, `cargo test --workspace`, desktop build on one OS |
 | `ci-package.yml` | Tauri bundles and artifact upload on one OS |
 | `ci-soak-linux.yml` | PipeWire null-device real-capture soak |
-| `ci-soak-windows.yml` | Self-hosted WASAPI loopback real-capture soak |
+
+The Windows WASAPI soak is disabled and no longer gates `publish`. A hosted
+Windows runner cannot provide both a render endpoint for loopback and a capture
+endpoint for the Mic track, and no self-hosted `buddy-audio-soak` runner is
+registered. See `tests/soak/README.md` for the remaining local-only procedure.
 
 Shared code lives outside the workflows:
 
