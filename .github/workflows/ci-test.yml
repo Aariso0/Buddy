@@ -1,0 +1,27 @@
+name: CI - test
+
+# Reusable test job. The top-level ci.yml calls it once per platform so the
+# commands stay identical and each runner stays a thin job definition.
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: Runner label for this platform
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ inputs.os }})
+    runs-on: ${{ inputs.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-workspace
+        with:
+          install-linux-deps: ${{ inputs.os == 'ubuntu-latest' }}
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace
+      - run: pnpm --filter @buddy/desktop build

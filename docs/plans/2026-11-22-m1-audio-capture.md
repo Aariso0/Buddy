@@ -66,7 +66,7 @@ The final reviewer triaged every deferred item below. All were judged benign, do
 ## Global Constraints
 
 - Branch `M1/Audio_Capture`; remote `https://github.com/Aariso0/Buddy.git`. Do not push.
-- License Apache-2.0, public repository. Verify every new dependency's license from its upstream source before adoption; update `NOTICE` and, for MPL-2.0 dependencies, `LICENSE-MPL-2.0.txt` plus the exact-version source-locations generator in `.github/workflows/ci.yml` in the same task.
+- License Apache-2.0, public repository. Verify every new dependency's license from its upstream source before adoption; update `NOTICE` and, for MPL-2.0 dependencies, `LICENSE-MPL-2.0.txt` plus the exact-version source-locations generator in `.github/scripts/stage-legal.sh` in the same task.
 - OS floors (decided): macOS **14.2+** (capture UNVERIFIED), Linux **PipeWire only** (no PulseAudio-only or plain-ALSA fallback), Windows **10+ with backend limitations accepted**. No virtual loopback device requirement for users.
 - Capture priority: audio threads do no allocation or locking on the hot path; a writer thread flushes chunks; downstream work consumes bounded queues that degrade rather than throttle capture.
 - One monotonic session clock timestamps every event.
@@ -106,7 +106,7 @@ These conditions are implied by the spec but easy to miss. Each is pinned to a t
 - Modify: `Cargo.toml` (add `crates/buddy-capture` to `members`)
 - Create: `crates/buddy-capture/Cargo.toml`, `crates/buddy-capture/src/lib.rs`, `crates/buddy-capture/src/fake.rs`
 - Create: `crates/buddy-core/src/clock.rs`
-- Test: `crates/buddy-core/tests/clock.rs`, `crates/buddy-capture/tests/contract.rs`
+- Test: `crates/buddy-core/tests/clock.rs`, `crates/buddy-capture/tests/` (one file per test, shared helpers in `tests/common/mod.rs`)
 
 **Interfaces:**
 - Consumes: nothing beyond the existing workspace.
@@ -144,7 +144,7 @@ Use `std::time::Instant` captured in `new()`; `now()` returns `self.origin.elaps
 
 - [ ] **Step 4: Write the failing fake-source contract test**
 
-In `crates/buddy-capture/tests/contract.rs`:
+In `crates/buddy-capture/tests/` (create one integration-test file per test, with shared helpers in `tests/common/mod.rs`):
 
 ```rust
 use buddy_capture::fake::FakeAudioSource;
@@ -169,7 +169,7 @@ fn fake_source_reports_injected_device_loss_as_typed_error() {
 
 - [ ] **Step 5: Run it to verify it fails**
 
-Run: `cargo test -p buddy-capture --test contract`
+Run: `cargo test -p buddy-capture --tests`
 Expected: compile error — crate or fake module does not exist.
 
 - [ ] **Step 6: Implement the traits and fake source**
@@ -195,7 +195,7 @@ git commit -m "feat: add session clock and capture source traits with fake"
 **Files:**
 - Create: `crates/buddy-capture/src/engine.rs`, `crates/buddy-capture/src/ring.rs`, `crates/buddy-capture/src/chunks.rs`
 - Modify: `crates/buddy-capture/src/lib.rs` (re-export new modules)
-- Test: `crates/buddy-capture/tests/contract.rs`
+- Test: `crates/buddy-capture/tests/` (one file per test)
 
 **Interfaces:**
 - Consumes: `SessionClock`, `AudioSource`, `TrackKind`, `CaptureError` and `FakeAudioSource` from Task 1.
@@ -203,7 +203,7 @@ git commit -m "feat: add session clock and capture source traits with fake"
   - `buddy_capture::ring::RingBuffer` with `new(capacity_frames: usize, channels: usize) -> Self`, `push(&self, samples: &[f32]) -> Result<(), RingError>`, `pop(&self, out: &mut [f32]) -> Option<usize>`; `RingError::Full` is a plain enum, not a panic.
   - `buddy_capture::engine::CaptureConfig { chunk_frames: u32, ring_frames: usize, channels: u16, sample_rate: u32 }` with `Default` = 48_000 Hz, 2 channels, `chunk_frames = 48_000`, `ring_frames = 8192`.
   - `buddy_capture::engine::CaptureEngine::new(session_id: &str, session_dir: &Path, clock: SessionClock, system: Box<dyn AudioSource>, mic: Box<dyn AudioSource>, config: CaptureConfig) -> Self` (stores `session_id` as `String` for the finalizer), with `start`, `pause`, `resume`, `stop` (all `-> Result<(), CaptureError>`).
-  - `buddy_capture::chunks::{ChunkInfo, write_chunk, read_chunk_index, GapMarker, GapReason, append_gap, read_gaps}` where `ChunkInfo { track: TrackKind, index: u32, path: PathBuf, frames: u32, sample_rate: u32, channels: u16 }`, `GapReason { Overrun, DeviceLoss }`, `GapMarker { start_ms: u64, end_ms: u64, reason: GapReason }`, `write_chunk(session_dir: &Path, track: TrackKind, index: u32, samples: &[f32], sample_rate: u32, channels: u16) -> Result<ChunkInfo, CaptureError>`, `read_chunk_index(session_dir: &Path) -> Result<Vec<ChunkInfo>, CaptureError>`, `append_gap(session_dir: &Path, marker: &GapMarker) -> Result<(), CaptureError>`, `read_gaps(session_dir: &Path) -> Result<Vec<GapMarker>, CaptureError>`.
+  - `buddy_capture::chunks::{ChunkInfo, write_chunk, read_chunk_index, GapMarker, GapReason, append_gap, read_gaps}` where `ChunkInfo { track: TrackKind, index: u32, path: PathBuf, frames: u32, sample_rate: u32, channels: u16 }`, `GapReason { Overrun, DeviceLoss }`, `GapMarker { track: TrackKind, start_ms: u64, end_ms: u64, reason: GapReason }`, `write_chunk(session_dir: &Path, track: TrackKind, index: u32, samples: &[f32], sample_rate: u32, channels: u16) -> Result<ChunkInfo, CaptureError>`, `read_chunk_index(session_dir: &Path) -> Result<Vec<ChunkInfo>, CaptureError>`, `append_gap(session_dir: &Path, marker: &GapMarker) -> Result<(), CaptureError>`, `read_gaps(session_dir: &Path) -> Result<Vec<GapMarker>, CaptureError>`.
 
 - [ ] **Step 1: Write the failing chunk and gap tests**
 
@@ -224,7 +224,7 @@ fn chunk_round_trip_preserves_float_samples() {
 #[test]
 fn gap_markers_round_trip_as_jsonl() {
     let dir = tempfile::tempdir().unwrap();
-    append_gap(dir.path(), &GapMarker { start_ms: 1200, end_ms: 1350, reason: GapReason::DeviceLoss }).unwrap();
+    append_gap(dir.path(), &GapMarker { track: TrackKind::System, start_ms: 1200, end_ms: 1350, reason: GapReason::DeviceLoss }).unwrap();
     let gaps = read_gaps(dir.path()).unwrap();
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].start_ms, 1200);
@@ -236,7 +236,7 @@ Add `tempfile` as a dev-dependency of `buddy-capture`. `read_chunk_samples` is a
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p buddy-capture --test contract`
+Run: `cargo test -p buddy-capture --tests`
 Expected: compile error — modules do not exist.
 
 - [ ] **Step 3: Implement chunks and gaps**
@@ -327,7 +327,7 @@ fn overrun_records_gap_and_keeps_capturing() {
 
 - [ ] **Step 5: Run them to verify they fail**
 
-Run: `cargo test -p buddy-capture --test contract`
+Run: `cargo test -p buddy-capture --tests`
 Expected: compile error — engine/ring modules do not exist.
 
 - [ ] **Step 6: Implement ring buffer and engine**
@@ -366,6 +366,10 @@ git commit -m "feat: add capture engine with chunked writes and gap recovery"
 
 - [ ] **Step 1: Write the failing identity and data-dir tests**
 
+The snippet assumes the test module's `use buddy_core::session::*;` (plus the
+settings imports and `now()` helper); the `create_session` calls use the current
+four-argument API with an explicit `Preset`.
+
 ```rust
 #[test]
 fn noncanonical_uuid_is_typed_error() {
@@ -373,7 +377,7 @@ fn noncanonical_uuid_is_typed_error() {
     for id in ["11111111-1111-4111-8111-111111111111".to_uppercase().as_str(),
                "11111111111141118111111111111111"] {
         assert!(matches!(
-            create_session(root.path(), id, now()),
+            create_session(root.path(), id, now(), Preset::Lecture),
             Err(SessionError::InvalidSessionId(_))
         ));
     }
@@ -384,7 +388,7 @@ fn empty_reserved_dir_is_not_adopted() {
     let root = tempfile::tempdir().unwrap();
     let id = "11111111-1111-4111-8111-111111111111";
     std::fs::create_dir_all(root.path().join(id)).unwrap(); // crash left this behind
-    assert!(matches!(create_session(root.path(), id, now()), Err(SessionError::AlreadyExists(_))));
+    assert!(matches!(create_session(root.path(), id, now(), Preset::Lecture), Err(SessionError::AlreadyExists(_))));
     assert!(matches!(read_session(root.path(), id), Err(SessionError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound));
 }
 
@@ -402,7 +406,7 @@ fn ensure_data_dir_precedes_save_settings() {
 fn finalize_session_marks_complete() {
     let root = tempfile::tempdir().unwrap();
     let id = "11111111-1111-4111-8111-111111111111";
-    create_session(root.path(), id, now()).unwrap();
+    create_session(root.path(), id, now(), Preset::Lecture).unwrap();
     let done = finalize_session(root.path(), id, now()).unwrap();
     assert!(matches!(done.state, SessionState::Complete));
     assert!(!recover_session(root.path(), id).unwrap().needs_repair);
@@ -436,7 +440,7 @@ git commit -m "feat: integrate capture with sessions and canonical ids"
 
 **Files:**
 - Create: `crates/buddy-capture/src/linux.rs`
-- Modify: `crates/buddy-capture/src/lib.rs` (cfg-gated re-export), `NOTICE`, `.github/workflows/ci.yml` (legal staging only if a new MPL dependency is adopted)
+- Modify: `crates/buddy-capture/src/lib.rs` (cfg-gated re-export), `NOTICE`, `.github/scripts/stage-legal.sh` (legal staging only if a new MPL dependency is adopted)
 - Test: `crates/buddy-capture/tests/linux_pipewire.rs`
 
 **Interfaces:**
@@ -484,7 +488,7 @@ Expected: tests pass on Linux; `cargo check` passes on other hosts with the modu
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/buddy-capture NOTICE .github/workflows/ci.yml Cargo.lock
+git add crates/buddy-capture NOTICE .github/scripts/stage-legal.sh Cargo.lock
 git commit -m "feat: add PipeWire audio backend for Linux"
 ```
 
@@ -494,7 +498,7 @@ git commit -m "feat: add PipeWire audio backend for Linux"
 
 **Files:**
 - Create: `crates/buddy-capture/src/windows.rs`
-- Modify: `crates/buddy-capture/src/lib.rs` (cfg-gated re-export), `NOTICE`, `.github/workflows/ci.yml` (legal staging if needed)
+- Modify: `crates/buddy-capture/src/lib.rs` (cfg-gated re-export), `NOTICE`, `.github/scripts/stage-legal.sh` (legal staging if needed)
 - Test: `crates/buddy-capture/tests/windows_wasapi.rs`
 
 **Interfaces:**
@@ -645,7 +649,7 @@ git commit -m "feat: expose recording controls and visible recording state"
 ### Task 8: Soak jobs, publish gating, legal recheck and exit verification
 
 **Files:**
-- Modify: `.github/workflows/ci.yml` (add `soak-linux`, `soak-windows`; add both to `publish.needs`), `.github/release-notes-template.md`, `NOTICE`
+- Modify: `.github/workflows/ci.yml` (wire reusable `soak-linux` and `soak-windows` jobs into `publish.needs`), create `.github/workflows/ci-soak-linux.yml` and `.github/workflows/ci-soak-windows.yml`, `.github/release-notes-template.md`, `NOTICE`
 - Create: `tests/soak/README.md` (how to run each soak and what a pass means)
 
 **Interfaces:**
@@ -680,11 +684,17 @@ Re-run the legal staging dry run. Confirm `NOTICE`, `LICENSE`, `LICENSE-MPL-2.0.
 - [ ] **Step 5: Verify the specified checks**
 
 ```bash
-python3 -c 'import yaml; yaml.safe_load(open(".github/workflows/ci.yml")); print("ok")'
+python3 - <<'PY'
+import yaml
+from pathlib import Path
+for path in [*Path(".github/workflows").glob("*.yml"), Path(".github/actions/setup-workspace/action.yml")]:
+    yaml.safe_load(path.read_text())
+    print(f"{path}: ok")
+PY
 cargo fmt --all -- --check && cargo test --workspace && pnpm --filter @buddy/desktop build
 ```
 
-Expected: YAML parses; all three commands pass. Soak jobs themselves cannot be fully exercised locally — report that plainly rather than claiming they passed.
+Expected: all YAML parses; all commands pass. Soak jobs themselves cannot be fully exercised locally — report that plainly rather than claiming they passed.
 
 - [ ] **Step 6: Commit**
 

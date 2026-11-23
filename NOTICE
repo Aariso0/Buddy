@@ -702,7 +702,7 @@ crate source Cargo.toml in the local Cargo registry cache; crates.io API
 records agreed for every entry reachable during the spike (clang-sys 1.9.1 and
 nom 8.0.0 timed out on the API and were confirmed from their published
 manifests only). None is MPL-2.0, so no source-location entry is added to the
-MPL generator in .github/workflows/ci.yml.
+MPL generator in .github/scripts/stage-legal.sh.
 
   annotate-snippets 0.11.5                     MIT OR Apache-2.0
   bindgen 0.72.1                               BSD-3-Clause
@@ -799,7 +799,7 @@ Notes on Windows WASAPI dependency licenses:
      dependency num-traits 0.2.19, plus log 0.4.35, thiserror 2.0.21, windows
      0.62.2 and windows-core 0.62.2, were already listed above.
    - No MPL-2.0 crate is introduced by this backend, so the exact-version
-     source-locations generator in .github/workflows/ci.yml is unchanged.
+     source-locations generator in .github/scripts/stage-legal.sh is unchanged.
 
 macOS audio backends (M1 S1)
 ----------------------------
@@ -873,7 +873,7 @@ The exact MIT text from coreaudio 0.6.2's LICENSE is reproduced here:
 The locked crates added by this binding are each attributed below; their exact
 SPDX identifiers were cross-checked against the published crate sources and,
 where reachable, the crates.io API. None is MPL-2.0, so the exact-version
-source-locations generator in .github/workflows/ci.yml is unchanged.
+source-locations generator in .github/scripts/stage-legal.sh is unchanged.
 
    coreaudio 0.6.2                                  MIT
    objc2-audio-toolbox 0.3.2                        Zlib OR Apache-2.0 OR MIT
@@ -943,7 +943,7 @@ The second `keyboard-types 0.7.0` is required by `global-hotkey`; `keyboard-type
 0.8.3 remains in use by `tauri`. The `windows-*` 0.52.6 family is pulled in only
 by `global-hotkey`'s Windows target dependency; the existing 0.42.2 family is
 unchanged. None of the new crates is MPL-2.0, so the exact-version
-source-locations generator in .github/workflows/ci.yml is unchanged.
+source-locations generator in .github/scripts/stage-legal.sh is unchanged.
 
 macOS capture permission: `apps/desktop/src-tauri/Info.plist` supplies
 `NSAudioCaptureUsageDescription`, referenced explicitly by

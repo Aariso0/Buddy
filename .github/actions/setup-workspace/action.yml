@@ -1,0 +1,35 @@
+name: Setup desktop workspace
+description: Install pnpm, Node, Rust, optional Linux build dependencies, and JS dependencies.
+
+inputs:
+  install-linux-deps:
+    description: Install the Linux Tauri/PipeWire system packages
+    required: false
+    default: 'false'
+  linux-extra-packages:
+    description: Extra apt packages appended to the Linux dependency install
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 10
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+        cache: pnpm
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt
+    - name: Install Linux build dependencies
+      if: ${{ inputs['install-linux-deps'] == 'true' }}
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libpipewire-0.3-dev patchelf ${{ inputs['linux-extra-packages'] }}
+    - name: Install JS dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile

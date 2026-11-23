@@ -37,7 +37,7 @@ Verification after the fixes: `cargo fmt --all -- --check`, `cargo test --worksp
 | Settings and support | `load_settings`/`save_settings` with typed errors and atomic writes; `SUPPORT_FLOORS` pinned to Windows 10, macOS 14.2 and PipeWire-only, with a regression test. |
 | CLI harness | `buddy-cli session new\|show\|recover` emitting the manifest or `{"needs_repair":…,"manifest":…}`, with a real-binary integration test. |
 | Desktop shell | Tauri 2 window titled `Buddy` (960×640), a `support_matrix()` command, generated icon set, `core:default`-only capability, and a compiled-config window test. The visible UI was deliberately the M0 placeholder; M1 added the capture control surface and visible state. |
-| CI and releases | `.github/workflows/ci.yml` tests PRs into `main` and pushes to `main` on Linux, Windows and macOS; a push publishing only when `apps/desktop/package.json` is newer than the latest `v*` tag. Unsigned NSIS `.exe`, `.dmg`, AppImage, `.deb`, `.rpm` and `.tar.gz`; release notes carry all required OS and unsigned-build warnings. No signing steps or signing secrets. |
+| CI and releases | `.github/workflows/ci.yml` orchestrates PRs into `main` and pushes to `main` through reusable `ci-test.yml`, `ci-package.yml`, `ci-soak-linux.yml` and `ci-soak-windows.yml` jobs on Linux, Windows and macOS; shared setup lives in `.github/actions/setup-workspace` and the release/legal logic in `.github/scripts/`. A push publishes only when `apps/desktop/package.json` is newer than the latest `v*` tag. Unsigned NSIS `.exe`, `.dmg`, AppImage, `.deb`, `.rpm` and `.tar.gz`; release notes carry all required OS and unsigned-build warnings. No signing steps or signing secrets. |
 
 ## Decisions carried forward
 

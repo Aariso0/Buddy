@@ -1,0 +1,115 @@
+name: CI - Linux soak
+
+# Reusable real-capture soak for PipeWire. The top-level ci.yml calls it only
+# on push; the publish job still depends on the resulting caller job.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  soak-linux:
+    name: soak-linux
+    runs-on: ubuntu-latest
+    container: archlinux:base
+    timeout-minutes: 90
+    outputs:
+      chunk-summary: ${{ steps.report.outputs.chunk-summary }}
+      gap-summary: ${{ steps.report.outputs.gap-summary }}
+    steps:
+      - name: Install Arch Linux audio and build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git rust clang ffmpeg \
+            pipewire pipewire-pulse pipewire-audio wireplumber libpulse
+      - uses: actions/checkout@v4
+      - name: Create a null sink and a null source, then start PipeWire
+        run: |
+          set -euo pipefail
+          mkdir -p /etc/pipewire/pipewire.conf.d
+          # The loopback module exposes its capture stream as an Audio/Sink and
+          # its playback stream as an Audio/Source, so pipelines that play into
+          # the null sink also feed the null source. No hardware is involved.
+          cat > /etc/pipewire/pipewire.conf.d/soak-null-devices.conf <<'EOF'
+          context.modules = [
+            {
+              name = libpipewire-module-loopback
+              args = {
+                node.description = "Buddy soak null devices"
+                audio.rate = 48000
+                audio.position = [ FL FR ]
+                capture.props = {
+                  node.name = "soak_null_sink"
+                  node.description = "Buddy soak null sink"
+                  media.class = "Audio/Sink"
+                }
+                playback.props = {
+                  node.name = "soak_null_source"
+                  node.description = "Buddy soak null source"
+                  media.class = "Audio/Source"
+                }
+              }
+            }
+          ]
+          EOF
+          export XDG_RUNTIME_DIR=/run/user/0
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          pipewire &
+          # WirePlumber needs the native socket; start it only once PipeWire has
+          # created it, with a bounded wait so a dead graph fails this step.
+          for _ in $(seq 1 60); do
+            [ -S "${XDG_RUNTIME_DIR}/pipewire-0" ] && break
+            sleep 1
+          done
+          if [ ! -S "${XDG_RUNTIME_DIR}/pipewire-0" ]; then
+            echo "PipeWire native socket did not appear in ${XDG_RUNTIME_DIR}" >&2
+            exit 1
+          fi
+          wireplumber &
+          pipewire-pulse &
+          for _ in $(seq 1 60); do
+            pactl info >/dev/null 2>&1 && break
+            sleep 1
+          done
+          pactl info
+          pactl set-default-sink soak_null_sink
+          pactl set-default-source soak_null_source
+          pactl list short sinks
+          pactl list short sources
+      - name: Generate a 60-minute signal and run the real-capture soak
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR=/run/user/0
+          SOAK_LOG="${RUNNER_TEMP}/soak.log"
+          # 440 Hz tone at 48 kHz stereo, exactly 3600 seconds.
+          ffmpeg -nostdin -hide_banner -loglevel error \
+            -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=3600" \
+            -ac 2 -c:a pcm_s16le "${RUNNER_TEMP}/soak-tone.wav"
+          pw-play "${RUNNER_TEMP}/soak-tone.wav" &
+          PLAY_PID=$!
+          sleep 2
+          set +e
+          BUDDY_AUDIO_SOAK=1 cargo test -p buddy-capture \
+            --test linux_pipewire -- --nocapture 2>&1 | tee "${SOAK_LOG}"
+          STATUS=${PIPESTATUS[0]}
+          BUDDY_AUDIO_SOAK=1 cargo test -p buddy-capture \
+            --test soak_real -- --ignored --nocapture 2>&1 | tee -a "${SOAK_LOG}"
+          STATUS=$((STATUS + ${PIPESTATUS[0]}))
+          kill "${PLAY_PID}" 2>/dev/null || true
+          exit "${STATUS}"
+      - name: Report soak chunk counts and gap markers
+        id: report
+        if: always()
+        run: |
+          SOAK_LOG="${RUNNER_TEMP:-/tmp}/soak.log"
+          chunks="$(grep -E '^(System|Mic): [0-9]+ chunks' "${SOAK_LOG}" 2>/dev/null | tr '\n' ';' || true)"
+          gaps="$(grep -E '^gaps: ' "${SOAK_LOG}" 2>/dev/null | tr '\n' ';' || true)"
+          echo "chunk-summary=${chunks:-unavailable}" >> "$GITHUB_OUTPUT"
+          echo "gap-summary=${gaps:-unavailable}" >> "$GITHUB_OUTPUT"
+          {
+            echo '### Soak results'
+            echo "Chunk counts: ${chunks:-unavailable}"
+            echo "Gap markers: ${gaps:-unavailable}"
+          } >> "$GITHUB_STEP_SUMMARY"
