@@ -281,9 +281,7 @@ version = "0.1.0"
 dependencies = [
  "buddy-core",
  "chrono",
- "core-foundation",
  "coreaudio",
- "objc2-core-audio",
  "pipewire",
  "serde",
  "serde_json",
