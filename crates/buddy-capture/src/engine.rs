@@ -145,7 +145,10 @@ struct Control {
     state: AtomicU8,
     writer_finish: AtomicBool,
     gap_queues: [GapQueue; 2],
-    // Both locks are touched only on failure paths (reader errors, writer
+    // Serializes gap stamping/enqueue with batch collection so an earlier gap
+    // can never be published in a later drain than a newer one.
+    gap_lock: Mutex<()>,
+    // These locks are touched only on failure paths (reader errors, writer
     // publication errors and stop after joins), never on a successful sample.
     reader_error: Mutex<Option<CaptureError>>,
     writer_error: Mutex<Option<CaptureError>>,
@@ -157,6 +160,7 @@ impl Control {
             state: AtomicU8::new(RUNNING),
             writer_finish: AtomicBool::new(false),
             gap_queues: [GapQueue::new(), GapQueue::new()],
+            gap_lock: Mutex::new(()),
             reader_error: Mutex::new(None),
             writer_error: Mutex::new(None),
         }
@@ -164,6 +168,12 @@ impl Control {
 }
 
 fn enqueue_gap(control: &Control, track: usize, reason: GapReason, clock: &SessionClock) {
+    // Stamp and enqueue under one guard: a drain collecting this pass cannot
+    // observe a later gap before this one has reached its queue.
+    let _gap_guard = control
+        .gap_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let event = GapEvent {
         track,
         reason,
@@ -478,9 +488,18 @@ fn drain_gaps(
     clock: &SessionClock,
 ) -> Result<usize, CaptureError> {
     let mut events = Vec::new();
-    for index in 0..2 {
-        while let Some(event) = control.gap_queues[index].pop() {
-            events.push(event);
+    {
+        // Collect under the same guard enqueue_gap uses. An event stamped
+        // before this pass is already queued, so sorting this batch keeps the
+        // published timeline monotonic across passes as well.
+        let _gap_guard = control
+            .gap_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for index in 0..2 {
+            while let Some(event) = control.gap_queues[index].pop() {
+                events.push(event);
+            }
         }
     }
     // The two readers detect gaps concurrently, so their queues can hold
@@ -580,5 +599,38 @@ fn writer_loop(
         if !drained {
             thread::sleep(WRITER_IDLE_SLEEP);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn gap_stamping_waits_for_the_drain_guard() {
+        let control = Arc::new(Control::new());
+        let clock = Arc::new(SessionClock::new());
+        let held = control
+            .gap_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_control = control.clone();
+        let worker_clock = clock.clone();
+        let worker = thread::spawn(move || {
+            enqueue_gap(&worker_control, 0, GapReason::Overrun, &worker_clock);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "a gap must not be stamped or enqueued while a drain owns the guard"
+        );
+        drop(held);
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("enqueue must resume once the drain releases the guard");
+        worker.join().unwrap();
+        assert!(control.gap_queues[0].pop().is_some());
     }
 }

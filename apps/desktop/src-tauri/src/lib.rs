@@ -331,7 +331,8 @@ impl RecordingController {
             Ok((active, view)) => {
                 let id = active.id.clone();
                 slot.active = Some(active);
-                drop(slot);
+                // Publish while the slot is still held: a concurrent transition
+                // must not emit a newer state before this one reaches the UI.
                 self.publish(view);
                 Ok(id)
             }
@@ -340,44 +341,38 @@ impl RecordingController {
     }
 
     fn pause(&self, id: &str) -> Result<(), String> {
-        let view = {
-            let mut slot = self.lock_slot();
-            if slot.busy {
-                return Err("another recording operation is in progress".to_owned());
-            }
-            let active = slot
-                .active
-                .as_mut()
-                .ok_or_else(|| "no active recording to pause".to_owned())?;
-            if active.id != id {
-                return Err(format!("unknown recording id: {id}"));
-            }
-            active.engine.pause().map_err(|error| error.to_string())?;
-            active.phase = Phase::Paused;
-            view_for(Some(active))
-        };
-        self.publish(view);
+        let mut slot = self.lock_slot();
+        if slot.busy {
+            return Err("another recording operation is in progress".to_owned());
+        }
+        let active = slot
+            .active
+            .as_mut()
+            .ok_or_else(|| "no active recording to pause".to_owned())?;
+        if active.id != id {
+            return Err(format!("unknown recording id: {id}"));
+        }
+        active.engine.pause().map_err(|error| error.to_string())?;
+        active.phase = Phase::Paused;
+        self.publish(view_for(Some(active)));
         Ok(())
     }
 
     fn resume(&self, id: &str) -> Result<(), String> {
-        let view = {
-            let mut slot = self.lock_slot();
-            if slot.busy {
-                return Err("another recording operation is in progress".to_owned());
-            }
-            let active = slot
-                .active
-                .as_mut()
-                .ok_or_else(|| "no active recording to resume".to_owned())?;
-            if active.id != id {
-                return Err(format!("unknown recording id: {id}"));
-            }
-            active.engine.resume().map_err(|error| error.to_string())?;
-            active.phase = Phase::Recording;
-            view_for(Some(active))
-        };
-        self.publish(view);
+        let mut slot = self.lock_slot();
+        if slot.busy {
+            return Err("another recording operation is in progress".to_owned());
+        }
+        let active = slot
+            .active
+            .as_mut()
+            .ok_or_else(|| "no active recording to resume".to_owned())?;
+        if active.id != id {
+            return Err(format!("unknown recording id: {id}"));
+        }
+        active.engine.resume().map_err(|error| error.to_string())?;
+        active.phase = Phase::Recording;
+        self.publish(view_for(Some(active)));
         Ok(())
     }
 
@@ -422,8 +417,10 @@ impl RecordingController {
             // failed stop leaves an engine that must not be reused. A new start
             // can reclaim the slot immediately; the error text stays in the HUD.
             debug_assert!(slot.active.is_none());
+            // Publish before releasing the slot so no later transition can
+            // make this stop view the stale last event in the frontend.
+            self.publish(next_view);
         }
-        self.publish(next_view);
         result
     }
 
@@ -582,7 +579,10 @@ mod tests {
     use super::*;
     use buddy_capture::{AudioSource, DeviceInfo, TrackKind};
     use std::path::Path;
+    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
 
     struct FakeSourceFactory;
 
@@ -629,6 +629,36 @@ mod tests {
         fn publish(&self, view: &RecordingView) {
             *self.title.lock().unwrap_or_else(|e| e.into_inner()) = view.title.clone();
             *self.hud.lock().unwrap_or_else(|e| e.into_inner()) = view.hud.clone();
+        }
+    }
+
+    /// Blocks start's publish so a second transition must wait for the slot
+    /// guard rather than slipping a newer state ahead of it.
+    struct GatedViewSink {
+        seen: Arc<Mutex<Vec<RecordingView>>>,
+        entered: mpsc::Sender<()>,
+        release: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+
+    impl ViewSink for GatedViewSink {
+        fn publish(&self, view: &RecordingView) {
+            self.seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(view.clone());
+            // Construction publishes an idle view first; only gate start.
+            if !matches!(view.phase, ViewPhase::Recording) {
+                return;
+            }
+            let _ = self.entered.send(());
+            if let Some(receiver) = self
+                .release
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                let _ = receiver.recv();
+            }
         }
     }
 
@@ -697,6 +727,64 @@ mod tests {
             "meeting" => Preset::Meeting,
             other => panic!("unknown preset: {other}"),
         }
+    }
+
+    #[test]
+    fn a_transition_publishes_before_another_can_change_the_state() {
+        let dir = tempfile::tempdir().expect("a temporary data directory");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(GatedViewSink {
+            seen: seen.clone(),
+            entered: entered_tx,
+            release: Mutex::new(Some(release_rx)),
+        });
+        let settings = Settings {
+            data_dir: dir.path().to_path_buf(),
+            ..Settings::default()
+        };
+        let controller = RecordingController::new(settings, Box::new(FakeSourceFactory), sink);
+
+        let starter = Arc::new(controller);
+        let start_controller = starter.clone();
+        let started = thread::spawn(move || start_controller.start(Preset::Lecture).unwrap());
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("start must publish its view");
+        let id = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|view| matches!(view.phase, ViewPhase::Recording))
+            .and_then(|view| view.session_id.clone())
+            .expect("a recording view has a session id");
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let pause_controller = starter.clone();
+        let pause_id = id.clone();
+        let paused = thread::spawn(move || {
+            let _ = ready_tx.send(());
+            pause_controller.pause(&pause_id)
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        // The pause has reached the slot but cannot publish until start's
+        // blocked publication finishes.
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(seen.lock().unwrap().len(), 2, "idle then start");
+
+        let _ = release_tx.send(());
+        assert_eq!(started.join().unwrap(), id);
+        paused.join().unwrap().unwrap();
+
+        let views = seen.lock().unwrap();
+        assert!(
+            matches!(
+                views.last().expect("a paused view").phase,
+                ViewPhase::Paused
+            ),
+            "the last published view must match the final state: {views:?}"
+        );
     }
 
     #[test]
