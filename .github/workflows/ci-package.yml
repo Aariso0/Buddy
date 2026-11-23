@@ -58,7 +58,7 @@ jobs:
       - name: Build macOS bundles
         if: ${{ inputs.os == 'macos-latest' }}
         run: pnpm --filter @buddy/desktop exec tauri build --bundles ${{ inputs.bundles }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ inputs.os == 'ubuntu-latest' }}
         with:
           name: ${{ inputs['artifact-name'] }}
@@ -68,13 +68,13 @@ jobs:
             target/release/bundle/rpm/*.rpm
             buddy-linux-x86_64.tar.gz
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ inputs.os == 'windows-latest' }}
         with:
           name: ${{ inputs['artifact-name'] }}
           path: target/release/bundle/nsis/*.exe
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ inputs.os == 'macos-latest' }}
         with:
           name: ${{ inputs['artifact-name'] }}
