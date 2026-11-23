@@ -8,6 +8,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Unbounded test sources must not outrun the writer on a loaded runner: each
+/// unread batch becomes an overrun marker, and a zero-delay read loop can fill
+/// the bounded gap queue before the writer can fsync its markers.
+const SOURCE_PACE: Duration = Duration::from_millis(2);
+
 #[test]
 fn fake_source_delivers_samples_without_allocating_in_caller() {
     let mut src = FakeAudioSource::from_samples(TrackKind::System, 48_000, vec![0.25; 512]);
@@ -312,7 +317,7 @@ fn both_tracks_record_simultaneously() {
 fn pause_resume_keeps_monotonic_timeline() {
     let dir = tempfile::tempdir().unwrap();
     let session_dir = session_dir_under(dir.path());
-    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, SOURCE_PACE);
     let mut engine = CaptureEngine::new(
         SESSION_ID,
         &session_dir,
@@ -549,7 +554,7 @@ fn gap_events_keep_per_event_timestamps() {
 fn generic_read_error_surfaces_from_stop_and_records_gap() {
     let dir = tempfile::tempdir().unwrap();
     let session_dir = session_dir_under(dir.path());
-    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, SOURCE_PACE);
     handle.inject(CaptureError::Backend("mic decoder exploded".to_owned()));
     let mut engine = CaptureEngine::new(
         SESSION_ID,
@@ -587,7 +592,7 @@ fn generic_read_error_surfaces_from_stop_and_records_gap() {
 fn device_loss_reconnects_source_and_keeps_reading() {
     let dir = tempfile::tempdir().unwrap();
     let session_dir = session_dir_under(dir.path());
-    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, SOURCE_PACE);
     handle.inject(CaptureError::DeviceLost("mic-1".into()));
     let mut engine = CaptureEngine::new(
         SESSION_ID,
@@ -656,7 +661,7 @@ fn failed_stop_does_not_finalize_the_session() {
     let dir = tempfile::tempdir().unwrap();
     let session_dir = session_dir_under(dir.path());
     let sessions_root = session_dir.parent().unwrap();
-    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, SOURCE_PACE);
     handle.inject(CaptureError::Backend("mic decoder exploded".to_owned()));
     let mut engine = CaptureEngine::new(
         SESSION_ID,
@@ -700,7 +705,7 @@ fn dropping_a_started_engine_closes_sources_without_finalizing() {
     let dir = tempfile::tempdir().unwrap();
     let session_dir = session_dir_under(dir.path());
     let sessions_root = dir.path().join("sessions");
-    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::ZERO);
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, SOURCE_PACE);
     let mut engine = CaptureEngine::new(
         SESSION_ID,
         &session_dir,
