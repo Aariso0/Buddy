@@ -428,21 +428,11 @@ fn overrun_records_gap_and_new_samples_reach_disk() {
     // The third read cannot start until the second has already overrun. Waiting
     // on reads avoids polling gaps.jsonl, which the writer fsyncs per marker.
     wait_for(|| handle.reads() >= 3);
+    let reads_at_switch = handle.reads();
     handle.set_value(0.75);
-    wait_for(|| {
-        read_chunk_index(&session_dir)
-            .map(|chunks| {
-                chunks
-                    .iter()
-                    .filter(|chunk| chunk.track == TrackKind::Mic)
-                    .any(|chunk| {
-                        read_chunk_samples(&session_dir, chunk)
-                            .map(|samples| samples.iter().any(|&sample| sample == 0.75))
-                            .unwrap_or(false)
-                    })
-            })
-            .unwrap_or(false)
-    });
+    wait_for(|| handle.reads() >= reads_at_switch + 8);
+    // stop() joins the readers, then drains the rings and flushes pending
+    // samples, so the distinguishable batch is on disk without polling chunks.
     engine.stop().unwrap();
 
     assert!(read_gaps(&session_dir)
