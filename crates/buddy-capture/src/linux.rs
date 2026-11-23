@@ -26,9 +26,9 @@ const DEFAULT_ID: &str = "default";
 const MIC_PREFIX: &str = "mic:";
 const SAMPLE_RATE: u32 = 48_000;
 const CHANNELS: u32 = 2;
-// About 170 ms of 48 kHz stereo, matching the engine's default ring: enough
-// to absorb a scheduling hiccup without an unbounded allocation. Allocated
-// once when the source opens.
+// About 170 ms of 48 kHz stereo: enough to absorb a PipeWire callback hiccup
+// without an unbounded allocation. The engine's deeper ring absorbs writer
+// stalls. Allocated once when the source opens.
 const RING_FRAMES: usize = 8192;
 const SAMPLE_BATCH: usize = 512;
 const LOOP_TICK: Duration = Duration::from_millis(20);

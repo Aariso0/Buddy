@@ -145,7 +145,12 @@ impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             chunk_frames: 48_000,
-            ring_frames: 8192,
+            // Two seconds of 48 kHz frames. The writer fsyncs every published
+            // chunk, and a busy host can stall that syscall for around a
+            // second. A 170 ms ring turned such a stall into dropped samples;
+            // this depth absorbs it while keeping the allocation ~1.5 MB for
+            // both tracks.
+            ring_frames: 96_000,
             channels: 2,
             sample_rate: 48_000,
         }
@@ -775,6 +780,16 @@ fn writer_loop(
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn default_ring_holds_two_seconds_of_audio() {
+        let config = CaptureConfig::default();
+        let seconds = config.ring_frames as u64 / u64::from(config.sample_rate);
+        assert!(
+            seconds >= 2,
+            "default ring holds {seconds}s; a writer fsync stall must not drop samples"
+        );
+    }
 
     #[test]
     fn gap_stamping_waits_for_the_drain_guard() {
