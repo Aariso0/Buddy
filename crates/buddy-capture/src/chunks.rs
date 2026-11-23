@@ -35,6 +35,9 @@ pub enum GapReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GapMarker {
+    /// The track that lost samples. Kept on disk so a Mic-only outage is not
+    /// indistinguishable from a System-only outage during recovery.
+    pub track: TrackKind,
     pub start_ms: u64,
     pub end_ms: u64,
     pub reason: GapReason,
@@ -92,6 +95,12 @@ pub fn write_chunk(
             "chunk needs samples, a sample rate and channels".to_owned(),
         ));
     }
+    if samples.len() % usize::from(channels) != 0 {
+        return Err(CaptureError::InvalidChunk(format!(
+            "chunk has {} samples for {channels} channels: incomplete interleaved frame",
+            samples.len()
+        )));
+    }
 
     let audio_dir = session_dir.join("audio");
     fs::create_dir_all(&audio_dir)?;
@@ -107,14 +116,23 @@ pub fn write_chunk(
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
 
-    let mut tmp = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp_path)?;
-    tmp.write_all(&bytes)?;
-    tmp.sync_all()?;
-    drop(tmp);
-    fs::rename(&tmp_path, &final_path)?;
+    let publication = (|| -> Result<(), CaptureError> {
+        let mut tmp = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        tmp.write_all(&bytes)?;
+        tmp.sync_all()?;
+        drop(tmp);
+        fs::rename(&tmp_path, &final_path)?;
+        Ok(())
+    })();
+    // A failed publication must not leak staging files that the chunk index
+    // ignores; the original error is more useful than any cleanup failure.
+    if let Err(error) = publication {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
     #[cfg(unix)]
     sync_dir(&audio_dir);
 
@@ -203,6 +221,12 @@ fn parse_chunk(path: &Path, track: TrackKind, index: u32) -> Result<ChunkInfo, C
                         )))
                     }
                 };
+                if size % (usize::from(channels) * 4) != 0 {
+                    return Err(CaptureError::InvalidChunk(format!(
+                        "{}: incomplete interleaved frame",
+                        path.display()
+                    )));
+                }
                 return Ok(ChunkInfo {
                     track,
                     index,

@@ -30,15 +30,10 @@ fn skip_or_fail(reason: &str) {
 }
 
 fn listed_devices() -> Option<Vec<DeviceInfo>> {
-    let devices = match CoreAudioSource::list_devices(TrackKind::System) {
-        Ok(devices) => devices,
-        Err(error) => {
-            skip_or_fail(&format!(
-                "CoreAudio device enumeration to succeed (got {error})"
-            ));
-            return None;
-        }
-    };
+    // Enumeration is device-independent: a backend regression here is always a
+    // failure, not an environment skip.
+    let devices = CoreAudioSource::list_devices(TrackKind::System)
+        .unwrap_or_else(|error| panic!("CoreAudio device enumeration failed: {error}"));
     assert!(
         devices.iter().any(|device| device.id == DEFAULT_ID),
         "system devices must include the default process-tap source: {devices:?}"

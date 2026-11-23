@@ -3,7 +3,7 @@ use buddy_core::support::SUPPORT_FLOORS;
 
 #[test]
 fn support_floors_match_spec() {
-    assert_eq!(SUPPORT_FLOORS.windows_min, "10");
+    assert_eq!(SUPPORT_FLOORS.windows_min, "10 version 1703");
     assert_eq!(SUPPORT_FLOORS.macos_min, "14.2");
     assert!(SUPPORT_FLOORS.linux_requires_pipewire);
 }

@@ -16,6 +16,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
+    time::Duration,
 };
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Builder as ShortcutBuilder, ShortcutState};
@@ -86,12 +87,23 @@ fn view_for(active: Option<&ActiveRecording>) -> RecordingView {
         Phase::Paused => (ViewPhase::Paused, "PAUSED", "paused"),
     };
     let seconds = active.engine.elapsed_ms() / 1000;
+    // A track whose reader has exited captures nothing even while the session
+    // is otherwise recording; show that instead of claiming both tracks live.
+    let track_status = |kind: &TrackKind| {
+        if active.engine.track_is_alive(kind) {
+            status
+        } else {
+            "stopped"
+        }
+    };
     RecordingView {
         phase,
         session_id: Some(active.id.clone()),
         title: format!("Buddy — {label}"),
         hud: format!(
-            "{label} · system: {status} · mic: {status} · preset: {} · {seconds}s",
+            "{label} · system: {} · mic: {} · preset: {} · {seconds}s",
+            track_status(&TrackKind::System),
+            track_status(&TrackKind::Mic),
             preset_label(&active.preset)
         ),
     }
@@ -231,19 +243,34 @@ struct RecordingController {
     sink: Arc<dyn ViewSink>,
     slot: Mutex<Slot>,
     view: Mutex<RecordingView>,
+    // Last liveness pair published by the watcher; reset on every new start.
+    liveness: Mutex<(bool, bool)>,
 }
 
 impl RecordingController {
-    fn new(settings: Settings, factory: Box<dyn SourceFactory>, sink: Arc<dyn ViewSink>) -> Self {
-        let controller = Self {
+    fn new(
+        settings: Settings,
+        factory: Box<dyn SourceFactory>,
+        sink: Arc<dyn ViewSink>,
+    ) -> Arc<Self> {
+        let controller = Arc::new(Self {
             settings,
             factory,
             sink,
             slot: Mutex::new(Slot::default()),
             view: Mutex::new(view_for(None)),
-        };
+            liveness: Mutex::new((true, true)),
+        });
         let view = controller.view();
         controller.publish(view);
+        // Track death is only observable from the engine, so a small watcher
+        // publishes the transition instead of leaving the HUD claiming both
+        // tracks are still recording.
+        let watcher = Arc::clone(&controller);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(250));
+            watcher.refresh_liveness();
+        });
         controller
     }
 
@@ -272,6 +299,32 @@ impl RecordingController {
         let mut stored = self.lock_view();
         *stored = view.clone();
         self.sink.publish(&view);
+    }
+
+    /// Publish once when either reader exits. The engine's liveness flag is
+    /// one-way, so no "recovered" transition can follow within one recording.
+    fn refresh_liveness(&self) {
+        let slot = self.lock_slot();
+        let Some(active) = slot.active.as_ref() else {
+            return;
+        };
+        let alive = (
+            active.engine.track_is_alive(&TrackKind::System),
+            active.engine.track_is_alive(&TrackKind::Mic),
+        );
+        let mut cached = self
+            .liveness
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *cached == alive {
+            return;
+        }
+        *cached = alive;
+        drop(cached);
+        if alive != (true, true) {
+            // Keep the same slot -> view lock order as every other transition.
+            self.publish(view_for(Some(active)));
+        }
     }
 
     fn list_devices(&self, kind: &TrackKind) -> Result<Vec<DeviceInfo>, String> {
@@ -363,6 +416,10 @@ impl RecordingController {
             Ok((active, view)) => {
                 let id = active.id.clone();
                 slot.active = Some(active);
+                *self
+                    .liveness
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = (true, true);
                 // Publish while the slot is still held: a concurrent transition
                 // must not emit a newer state before this one reaches the UI.
                 self.publish(view);
@@ -468,10 +525,23 @@ impl RecordingController {
             None => self.start(Preset::Lecture).map(|_| ()),
         }
     }
+
+    /// Quit-time cleanup: stop a recording if one exists, but never start a
+    /// new one. Idle quits stay immediate.
+    fn stop_active(&self) -> Result<(), String> {
+        let id = {
+            let slot = self.lock_slot();
+            match slot.active.as_ref() {
+                Some(active) => active.id.clone(),
+                None => return Ok(()),
+            }
+        };
+        self.stop(&id)
+    }
 }
 
 struct AppState {
-    controller: RecordingController,
+    controller: Arc<RecordingController>,
     // Holding the tray keeps it alive for the whole process.
     _tray: tauri::tray::TrayIcon,
 }
@@ -567,6 +637,11 @@ pub fn run() {
                     if id == TRAY_TOGGLE_ID {
                         toggle_from_ui(app);
                     } else if id == TRAY_QUIT_ID {
+                        if let Some(state) = app.try_state::<AppState>() {
+                            if let Err(error) = state.controller.stop_active() {
+                                eprintln!("failed to stop recording before quit: {error}");
+                            }
+                        }
                         app.exit(0);
                     }
                 })
@@ -612,7 +687,7 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     struct FakeSourceFactory;
 
@@ -693,7 +768,7 @@ mod tests {
     }
 
     struct TestApp {
-        controller: RecordingController,
+        controller: Arc<RecordingController>,
         sink: Arc<MemoryViewSink>,
     }
 
@@ -774,9 +849,7 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             ..Settings::default()
         };
-        let controller = RecordingController::new(settings, Box::new(FakeSourceFactory), sink);
-
-        let starter = Arc::new(controller);
+        let starter = RecordingController::new(settings, Box::new(FakeSourceFactory), sink);
         let start_controller = starter.clone();
         let started = thread::spawn(move || start_controller.start(Preset::Lecture).unwrap());
         entered_rx
@@ -833,6 +906,50 @@ mod tests {
         assert!(app.hud_text().contains("system"));
         assert!(app.hud_text().contains("mic"));
         app.trigger_hotkey("start_stop");
+        assert!(!app.window_title().contains("REC"));
+    }
+
+    #[test]
+    fn a_dead_track_is_published_without_ending_the_session() {
+        let dir = tempfile::tempdir().expect("a temporary data directory");
+        let app = TestApp::new(dir.path(), Box::new(FakeSourceFactory));
+        let id = app.call("start_recording", "lecture").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let dead = {
+                let slot = app.controller.lock_slot();
+                slot.active
+                    .as_ref()
+                    .map(|active| !active.engine.track_is_alive(&TrackKind::System))
+                    .unwrap_or(false)
+            };
+            app.controller.refresh_liveness();
+            if dead || Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let hud = app.hud_text();
+        assert!(
+            hud.contains("system: stopped") && hud.contains("mic: stopped"),
+            "dead readers must be visible in the HUD: {hud}"
+        );
+        let view = app.controller.view();
+        assert_eq!(view.session_id.as_deref(), Some(id.as_str()));
+        assert!(matches!(view.phase, ViewPhase::Recording));
+    }
+
+    #[test]
+    fn quit_stops_an_active_recording_and_is_immediate_when_idle() {
+        let dir = tempfile::tempdir().expect("a temporary data directory");
+        let app = TestApp::new(dir.path(), Box::new(FakeSourceFactory));
+        app.controller.stop_active().unwrap(); // idle quit must stay a no-op
+
+        let id = app.call("start_recording", "lecture").unwrap();
+        let sessions_root = dir.path().join("sessions");
+        app.controller.stop_active().unwrap();
+        let manifest = buddy_core::session::read_session(&sessions_root, &id).unwrap();
+        assert_eq!(manifest.state, buddy_core::session::SessionState::Complete);
         assert!(!app.window_title().contains("REC"));
     }
 
@@ -963,7 +1080,7 @@ mod tests {
     #[test]
     fn support_matrix_command_matches_spec() {
         let m = support_matrix();
-        assert_eq!(m.windows_min, "10");
+        assert_eq!(m.windows_min, "10 version 1703");
         assert_eq!(m.macos_min, "14.2");
         assert!(m.linux_requires_pipewire);
     }

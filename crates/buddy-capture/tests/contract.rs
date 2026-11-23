@@ -3,7 +3,7 @@ use buddy_capture::engine::*;
 use buddy_capture::fake::FakeAudioSource;
 use buddy_capture::{AudioSource, CaptureError, DeviceInfo, TrackKind};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -82,6 +82,7 @@ fn gap_markers_round_trip_as_jsonl() {
     append_gap(
         dir.path(),
         &GapMarker {
+            track: TrackKind::Mic,
             start_ms: 1200,
             end_ms: 1350,
             reason: GapReason::DeviceLoss,
@@ -90,8 +91,65 @@ fn gap_markers_round_trip_as_jsonl() {
     .unwrap();
     let gaps = read_gaps(dir.path()).unwrap();
     assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].track, TrackKind::Mic);
     assert_eq!(gaps[0].start_ms, 1200);
+    assert_eq!(gaps[0].end_ms, 1350);
     assert!(matches!(gaps[0].reason, GapReason::DeviceLoss));
+}
+
+#[test]
+fn an_incomplete_interleaved_frame_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        write_chunk(dir.path(), TrackKind::Mic, 0, &[0.0, 1.0, 2.0], 48_000, 2),
+        Err(CaptureError::InvalidChunk(_))
+    ));
+    // Complete stereo and mono frames stay valid.
+    assert!(write_chunk(dir.path(), TrackKind::Mic, 0, &[0.0, 1.0], 48_000, 2).is_ok());
+    assert!(write_chunk(dir.path(), TrackKind::System, 0, &[0.0], 48_000, 1).is_ok());
+}
+
+#[test]
+fn parsing_rejects_an_incomplete_interleaved_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("audio")).unwrap();
+    let data_bytes = 12u32; // three f32 values: one and a half stereo frames
+    let mut bytes = vec![0u8; 44];
+    bytes[0..4].copy_from_slice(b"RIFF");
+    bytes[4..8].copy_from_slice(&(36 + data_bytes).to_le_bytes());
+    bytes[8..12].copy_from_slice(b"WAVE");
+    bytes[12..16].copy_from_slice(b"fmt ");
+    bytes[16..20].copy_from_slice(&16u32.to_le_bytes());
+    bytes[20..22].copy_from_slice(&3u16.to_le_bytes());
+    bytes[22..24].copy_from_slice(&2u16.to_le_bytes());
+    bytes[24..28].copy_from_slice(&48_000u32.to_le_bytes());
+    bytes[28..32].copy_from_slice(&(48_000u32 * 8).to_le_bytes());
+    bytes[32..34].copy_from_slice(&8u16.to_le_bytes());
+    bytes[34..36].copy_from_slice(&32u16.to_le_bytes());
+    bytes[36..40].copy_from_slice(b"data");
+    bytes[40..44].copy_from_slice(&data_bytes.to_le_bytes());
+    for value in [0.0f32, 1.0, 2.0] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    std::fs::write(dir.path().join("audio/system-0000.wav"), bytes).unwrap();
+    let error = read_chunk_index(dir.path()).expect_err("half a frame must not parse");
+    assert!(
+        matches!(&error, CaptureError::InvalidChunk(message) if message.contains("incomplete interleaved frame")),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn failed_publication_removes_the_staging_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("audio/system-0000.wav")).unwrap();
+    assert!(write_chunk(dir.path(), TrackKind::System, 0, &[0.5, 0.5], 48_000, 2).is_err());
+    let staged: Vec<_> = std::fs::read_dir(dir.path().join("audio"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect();
+    assert!(staged.is_empty(), "staging files leaked: {staged:?}");
 }
 
 #[test]
@@ -117,7 +175,10 @@ struct SourceHandle {
     closes: Arc<AtomicUsize>,
     value: Arc<Mutex<f32>>,
     delay: Arc<Mutex<Duration>>,
+    reconnect_delay: Arc<Mutex<Duration>>,
     burst: Arc<AtomicUsize>,
+    // A backend-shaped stall: reads fail until resume() re-arms the stream.
+    stalled: Arc<AtomicBool>,
 }
 
 impl SourceHandle {
@@ -150,6 +211,11 @@ impl SourceHandle {
     fn set_burst(&self, reads: usize) {
         self.burst.store(reads, Ordering::SeqCst);
     }
+
+    /// Delay re-arming so a device-loss gap stays open while the writer runs.
+    fn set_reconnect_delay(&self, delay: Duration) {
+        *self.reconnect_delay.lock().unwrap() = delay;
+    }
 }
 
 /// Test source with controllable error injection, a configurable per-read
@@ -177,7 +243,9 @@ impl ControlledSource {
                 0.25
             })),
             delay: Arc::new(Mutex::new(delay)),
+            reconnect_delay: Arc::new(Mutex::new(Duration::ZERO)),
             burst: Arc::new(AtomicUsize::new(0)),
+            stalled: Arc::new(AtomicBool::new(false)),
         };
         (
             Self {
@@ -212,6 +280,9 @@ impl AudioSource for ControlledSource {
 
     fn read(&mut self, out: &mut [f32]) -> Result<usize, CaptureError> {
         self.handle.reads.fetch_add(1, Ordering::SeqCst);
+        if self.handle.stalled.load(Ordering::SeqCst) {
+            return Err(CaptureError::Backend("paused stream stalled".to_owned()));
+        }
         let delay = if self.handle.burst.load(Ordering::SeqCst) > 0 {
             self.handle.burst.fetch_sub(1, Ordering::SeqCst);
             Duration::ZERO
@@ -234,16 +305,24 @@ impl AudioSource for ControlledSource {
 
     fn pause(&mut self) -> Result<(), CaptureError> {
         self.handle.pauses.fetch_add(1, Ordering::SeqCst);
+        self.handle.stalled.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     fn resume(&mut self) -> Result<(), CaptureError> {
+        self.handle.stalled.store(false, Ordering::SeqCst);
         Ok(())
     }
 
     fn reconnect(&mut self) -> Result<(), CaptureError> {
-        self.handle.reconnects.fetch_add(1, Ordering::SeqCst);
+        let delay = *self.handle.reconnect_delay.lock().unwrap();
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
+        // Clear the consumed error before publishing completion: observers use
+        // this counter as a signal that they may inject the next one.
         *self.handle.injection.lock().unwrap() = None;
+        self.handle.reconnects.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -311,6 +390,116 @@ fn both_tracks_record_simultaneously() {
         .collect();
     assert!(kinds.contains(&TrackKind::System));
     assert!(kinds.contains(&TrackKind::Mic));
+}
+
+#[test]
+fn a_source_sample_rate_mismatch_is_rejected_before_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
+    let mut engine = CaptureEngine::new(
+        SESSION_ID,
+        &session_dir,
+        buddy_core::clock::SessionClock::new(),
+        Box::new(FakeAudioSource::from_samples(
+            TrackKind::System,
+            44_100,
+            vec![0.5; 16],
+        )),
+        Box::new(FakeAudioSource::from_samples(
+            TrackKind::Mic,
+            48_000,
+            vec![0.25; 16],
+        )),
+        CaptureConfig::default(),
+    )
+    .unwrap();
+    let error = engine
+        .start()
+        .expect_err("a 44.1 kHz source must not be labelled 48 kHz");
+    assert!(
+        matches!(&error, CaptureError::Backend(message) if message.contains("sample rate")),
+        "unexpected error: {error}"
+    );
+    assert!(
+        matches!(engine.stop(), Err(CaptureError::Backend(message)) if message.contains("before start")),
+        "a rejected start must not leave a writer running"
+    );
+}
+
+#[test]
+fn restarting_a_consumed_engine_is_rejected_before_state_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
+    let mut engine = engine_with(vec![0.5; 128], vec![0.25; 128], &session_dir);
+    engine.start().unwrap();
+    engine.stop().unwrap();
+    let error = engine
+        .start()
+        .expect_err("sources handed to the first start cannot be reused");
+    assert!(
+        matches!(&error, CaptureError::Backend(message) if message.contains("already consumed")),
+        "unexpected error: {error}"
+    );
+    assert!(
+        matches!(engine.stop(), Err(CaptureError::Backend(message)) if message.contains("before start")),
+        "a rejected restart must remain safely stoppable"
+    );
+}
+
+#[test]
+fn dead_reader_tracks_are_visible_before_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
+    let (system, _system_handle) =
+        ControlledSource::new(TrackKind::System, usize::MAX, SOURCE_PACE);
+    let (mic, _mic_handle) = ControlledSource::new(TrackKind::Mic, 8, Duration::ZERO);
+    let mut engine = CaptureEngine::new(
+        SESSION_ID,
+        &session_dir,
+        buddy_core::clock::SessionClock::new(),
+        Box::new(system),
+        Box::new(mic),
+        CaptureConfig::default(),
+    )
+    .unwrap();
+    engine.start().unwrap();
+    wait_for(|| !engine.track_is_alive(&TrackKind::Mic));
+    assert!(engine.track_is_alive(&TrackKind::System));
+    engine.stop().unwrap();
+    assert!(!engine.track_is_alive(&TrackKind::Mic));
+}
+
+#[test]
+fn stopping_a_paused_recording_is_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, SOURCE_PACE);
+    let mut engine = CaptureEngine::new(
+        SESSION_ID,
+        &session_dir,
+        buddy_core::clock::SessionClock::new(),
+        Box::new(FakeAudioSource::from_samples(
+            TrackKind::System,
+            48_000,
+            vec![0.5; 96_000],
+        )),
+        Box::new(mic),
+        CaptureConfig::default(),
+    )
+    .unwrap();
+    engine.start().unwrap();
+    engine.pause().unwrap();
+    wait_for(|| handle.pauses() >= 1);
+    engine
+        .stop()
+        .expect("a normal pause-then-stop must not report a backend stall");
+    assert!(
+        read_gaps(&session_dir)
+            .unwrap()
+            .iter()
+            .all(|gap| matches!(gap.reason, GapReason::Overrun)),
+        "a clean pause-then-stop must not record a track failure"
+    );
 }
 
 #[test]
@@ -390,16 +579,57 @@ fn device_loss_records_gap_and_reconnects() {
     engine.start().unwrap();
     engine.stop().unwrap();
     let gaps = read_gaps(&session_dir).unwrap();
+    let losses: Vec<_> = gaps
+        .iter()
+        .filter(|g| matches!(g.reason, GapReason::DeviceLoss))
+        .collect();
+    assert_eq!(losses.len(), 1);
     assert_eq!(
-        gaps.iter()
-            .filter(|g| matches!(g.reason, GapReason::DeviceLoss))
-            .count(),
-        1
+        losses[0].track,
+        TrackKind::Mic,
+        "the gap must name the track that lost samples: {losses:?}"
     );
     assert!(read_chunk_index(&session_dir)
         .unwrap()
         .iter()
         .any(|c| c.track == TrackKind::Mic));
+}
+
+#[test]
+fn device_loss_gap_ends_at_reader_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = session_dir_under(dir.path());
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, SOURCE_PACE);
+    handle.set_reconnect_delay(Duration::from_millis(300));
+    let mut engine = CaptureEngine::new(
+        SESSION_ID,
+        &session_dir,
+        buddy_core::clock::SessionClock::new(),
+        Box::new(FakeAudioSource::from_samples(
+            TrackKind::System,
+            48_000,
+            vec![0.5; 96_000],
+        )),
+        Box::new(mic),
+        CaptureConfig::default(),
+    )
+    .unwrap();
+    engine.start().unwrap();
+    wait_for(|| handle.reads() >= 1);
+    handle.inject(CaptureError::DeviceLost("slow-recovery".to_owned()));
+    wait_for(|| handle.reconnects() >= 1);
+    engine.stop().unwrap();
+
+    let loss = read_gaps(&session_dir)
+        .unwrap()
+        .into_iter()
+        .find(|gap| matches!(gap.reason, GapReason::DeviceLoss))
+        .expect("a device-loss gap must be published");
+    assert_eq!(loss.track, TrackKind::Mic);
+    assert!(
+        loss.end_ms.saturating_sub(loss.start_ms) >= 250,
+        "the gap must span the recovery delay, not end when the writer drains it: {loss:?}"
+    );
 }
 
 #[test]

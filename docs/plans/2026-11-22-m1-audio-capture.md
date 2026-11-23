@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Record system audio and microphone as two independent, synchronized tracks with chunked lossless writes, pause/resume, device-loss recovery and crash recovery — real on Linux (PipeWire) and Windows 10+, compiled but UNVERIFIED on macOS 14.2+.
+**Goal:** Record system audio and microphone as two independent, synchronized tracks with chunked lossless writes, pause/resume, device-loss recovery and crash recovery — real on Linux (PipeWire) and Windows 10 version 1703+, compiled but UNVERIFIED on macOS 14.2+.
 
 **Architecture:** A new `buddy-capture` crate owns an `AudioSource` trait, an engine driven by a monotonic session clock, a bounded single-producer/single-consumer ring buffer on the capture hot path, and a writer thread that publishes one-second IEEE-float WAV chunks plus gap markers into the existing session directory. `buddy-core` gains the clock, a session finalizer, strict UUID validation and a data-dir bootstrap. Per-OS backends sit behind the trait; the same fake-source contract suite runs in CI on every OS. CI gains real-capture soak jobs on Arch Linux and Windows that gate `publish`.
 
-**Tech Stack:** Rust stable; `thiserror`, `serde`, `chrono`, `uuid` (already in use); PipeWire monitor of the default sink (Linux), WASAPI loopback (Windows 10+), ScreenCaptureKit audio / CoreAudio taps (macOS 14.2+, UNVERIFIED); Tauri 2 commands for control. Exact backend crate versions are chosen by the license-verified spike at the start of each backend task, not guessed here.
+**Tech Stack:** Rust stable; `thiserror`, `serde`, `chrono`, `uuid` (already in use); PipeWire monitor of the default sink (Linux), WASAPI loopback (Windows 10 version 1703+), ScreenCaptureKit audio / CoreAudio taps (macOS 14.2+, UNVERIFIED); Tauri 2 commands for control. Exact backend crate versions are chosen by the license-verified spike at the start of each backend task, not guessed here.
 
 **Spec:** `docs/specs/2026-11-22-mvp-branch-design.md` (approved 2026-11-22), `plan.md` §5, §7–§8, §13–§16, §18–§19, and `docs/specs/2026-11-22-m0-completion.md` §"Session identity and creation semantics".
 
@@ -503,7 +503,7 @@ git commit -m "feat: add PipeWire audio backend for Linux"
 
 - [ ] **Step 1: Spike and record the crate choice (S2)**
 
-Verify one WASAPI binding against upstream: exact version, license, loopback support on Windows 10+, and observed behaviour with exclusive-mode apps. Record in `NOTICE` (and source locations if MPL). Document the characterisation in `docs/specs/2026-11-22-mvp-branch-design.md` §"Risks carried into implementation" so release notes can state the limitation honestly. If loopback is not viable on Windows 10, stop and ask the user — no virtual loopback device requirement may be introduced.
+Verify one WASAPI binding against upstream: exact version, license, loopback support on Windows 10 version 1703+, and observed behaviour with exclusive-mode apps. Record in `NOTICE` (and source locations if MPL). Document the characterisation in `docs/specs/2026-11-22-mvp-branch-design.md` §"Risks carried into implementation" so release notes can state the limitation honestly. If loopback is not viable on Windows 10 version 1703+, stop and ask the user — no virtual loopback device requirement may be introduced.
 
 - [ ] **Step 2: Write the failing backend test**
 

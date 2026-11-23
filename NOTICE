@@ -937,7 +937,7 @@ its crates.io API record and cross-checked against the published crate source:
     xkeysym 0.2.1                                  MIT OR Apache-2.0 OR Zlib
     windows-sys 0.59.0                             MIT OR Apache-2.0
     windows-targets 0.52.6                         MIT OR Apache-2.0
-    windows_* 0.52.6 (all ten target crates)       MIT OR Apache-2.0
+    windows_* 0.52.6 (all eight target crates)     MIT OR Apache-2.0
 
 The second `keyboard-types 0.7.0` is required by `global-hotkey`; `keyboard-types`
 0.8.3 remains in use by `tauri`. The `windows-*` 0.52.6 family is pulled in only
