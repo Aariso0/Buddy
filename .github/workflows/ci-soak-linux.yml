@@ -22,7 +22,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed \
             base-devel git rust clang ffmpeg \
-            pipewire pipewire-pulse pipewire-audio wireplumber libpulse
+            pipewire pipewire-pulse pipewire-audio wireplumber libpulse dbus
       - uses: actions/checkout@v4
       - name: Create a null sink and a null source, then start PipeWire
         run: |
@@ -53,9 +53,29 @@ jobs:
             }
           ]
           EOF
+          # WirePlumber's D-Bus components and dbus-daemon autolaunch both need
+          # a machine id. A bare container has neither that nor a session bus;
+          # without them defaults are never published and pactl reports
+          # "Not supported" when the soak tries to select the null devices.
+          if [ ! -s /etc/machine-id ]; then
+            cat /proc/sys/kernel/random/uuid > /etc/machine-id
+          fi
+          mkdir -p /var/lib/dbus
+          ln -sf /etc/machine-id /var/lib/dbus/machine-id
           export XDG_RUNTIME_DIR=/run/user/0
           mkdir -p "$XDG_RUNTIME_DIR"
           chmod 700 "$XDG_RUNTIME_DIR"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+          dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nofork --nopidfile --print-address \
+            > "${XDG_RUNTIME_DIR}/dbus-session.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            [ -S "${XDG_RUNTIME_DIR}/bus" ] && break
+            sleep 1
+          done
+          if [ ! -S "${XDG_RUNTIME_DIR}/bus" ]; then
+            echo "D-Bus session bus did not start" >&2
+            exit 1
+          fi
           pipewire &
           # WirePlumber needs the native socket; start it only once PipeWire has
           # created it, with a bounded wait so a dead graph fails this step.
@@ -74,14 +94,35 @@ jobs:
             sleep 1
           done
           pactl info
-          pactl set-default-sink soak_null_sink
-          pactl set-default-source soak_null_source
+          # WirePlumber publishes the default metadata asynchronously. Retry
+          # until it is ready instead of letting a transient "Not supported"
+          # fail this step, then verify the soak endpoints really are defaults.
+          for _ in $(seq 1 30); do
+            pactl set-default-sink soak_null_sink 2>/dev/null || true
+            pactl set-default-source soak_null_source 2>/dev/null || true
+            if pactl info | grep -q '^Default Sink: soak_null_sink$' \
+              && pactl info | grep -q '^Default Source: soak_null_source$'; then
+              break
+            fi
+            sleep 1
+          done
+          if ! pactl info | grep -q '^Default Sink: soak_null_sink$'; then
+            echo "soak_null_sink is not the default sink" >&2
+            pactl info >&2
+            exit 1
+          fi
+          if ! pactl info | grep -q '^Default Source: soak_null_source$'; then
+            echo "soak_null_source is not the default source" >&2
+            pactl info >&2
+            exit 1
+          fi
           pactl list short sinks
           pactl list short sources
       - name: Generate a 60-minute signal and run the real-capture soak
         run: |
           set -euo pipefail
           export XDG_RUNTIME_DIR=/run/user/0
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
           SOAK_LOG="${RUNNER_TEMP}/soak.log"
           # 440 Hz tone at 48 kHz stereo, exactly 3600 seconds.
           ffmpeg -nostdin -hide_banner -loglevel error \
