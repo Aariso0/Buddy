@@ -12,7 +12,10 @@ use chrono::Utc;
 use serde::Serialize;
 use std::{
     fs,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Builder as ShortcutBuilder, ShortcutState};
@@ -101,17 +104,46 @@ trait ViewSink: Send + Sync {
 
 struct TauriViewSink {
     app: tauri::AppHandle,
+    latest: Arc<AtomicU64>,
+}
+
+impl TauriViewSink {
+    fn new(app: tauri::AppHandle) -> Self {
+        Self {
+            app,
+            latest: Arc::new(AtomicU64::new(0)),
+        }
+    }
 }
 
 impl ViewSink for TauriViewSink {
     fn publish(&self, view: &RecordingView) {
-        if let Some(window) = self.app.get_webview_window("main") {
-            let _ = window.set_title(&view.title);
-        }
-        if let Some(tray) = self.app.tray_by_id(TRAY_ID) {
-            let _ = tray.set_title(Some(&view.title));
-        }
-        let _ = self.app.emit("recording-state", view.clone());
+        // Title and emit calls are main-thread operations. Queue them so a
+        // transition never holds `slot` while waiting on the UI thread: a tray
+        // or hotkey callback can need `slot` too, and a synchronous wait would
+        // deadlock. `run_on_main_thread` executes inline on the main thread but
+        // queues from background threads, so a queued snapshot can land after
+        // a newer inline one. Transitions serialize on the view guard, making
+        // this sequence match publication order; a task that finds a newer
+        // sequence is stale and must not overwrite the UI.
+        let seq = self.latest.fetch_add(1, Ordering::SeqCst) + 1;
+        let app = self.app.clone();
+        let latest = self.latest.clone();
+        let view = view.clone();
+        let _ = self.app.run_on_main_thread(move || {
+            if latest.load(Ordering::SeqCst) != seq {
+                return;
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_title(&view.title);
+            }
+            if let Some(tray) = app.tray_by_id(TRAY_ID) {
+                let _ = tray.set_title(Some(&view.title));
+            }
+            // `emit` can also wait on the main thread when Tauri's `tracing`
+            // feature is on, so it belongs in the same queued task.
+            let _ = app.emit("recording-state", &view);
+        });
     }
 }
 
@@ -540,9 +572,7 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            let sink = Arc::new(TauriViewSink {
-                app: app.handle().clone(),
-            });
+            let sink = Arc::new(TauriViewSink::new(app.handle().clone()));
             let controller =
                 RecordingController::new(Settings::default(), Box::new(PlatformSources), sink);
             app.manage(AppState {
@@ -768,9 +798,16 @@ mod tests {
             pause_controller.pause(&pause_id)
         });
         ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        // The pause has reached the slot but cannot publish until start's
-        // blocked publication finishes.
-        thread::sleep(Duration::from_millis(50));
+        // Start still owns the slot while its publication is blocked, so a
+        // concurrent pause cannot change or publish the state. Assert the
+        // guard directly instead of guessing with a timed sleep.
+        assert!(
+            matches!(
+                starter.slot.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ),
+            "start must hold the slot until its view is published"
+        );
         assert_eq!(seen.lock().unwrap().len(), 2, "idle then start");
 
         let _ = release_tx.send(());
