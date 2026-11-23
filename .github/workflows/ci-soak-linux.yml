@@ -23,7 +23,7 @@ jobs:
           pacman -Syu --noconfirm --needed \
             base-devel git rust clang ffmpeg \
             pipewire pipewire-pulse pipewire-audio wireplumber libpulse dbus
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Create a null sink and a null source, then start PipeWire
         run: |
           set -euo pipefail
