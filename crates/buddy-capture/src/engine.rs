@@ -262,6 +262,38 @@ fn close_gap(control: &Control, track: usize, clock: &SessionClock) {
     );
 }
 
+/// A restarted writer numbers chunks from zero again, so `fs::rename` would
+/// overwrite earlier published output and leave later chunks unmatched. Refuse
+/// to start into a session that already holds capture output. Dot-prefixed
+/// staging files from an interrupted write are not reachable from any published
+/// index, so they are ignored.
+fn reject_existing_capture_output(
+    session_dir: &Path,
+    session_id: &str,
+) -> Result<(), CaptureError> {
+    let audio_dir = session_dir.join("audio");
+    let entries = match fs::read_dir(&audio_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        if name == "gaps.jsonl" || name.ends_with(".wav") {
+            return Err(CaptureError::Backend(format!(
+                "session {session_id} already has capture output: {}",
+                entry.path().display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub struct CaptureEngine {
     // Kept for Task 3's finalizer, which marks this session complete on a
     // clean stop.
@@ -293,6 +325,12 @@ impl CaptureEngine {
             return Err(CaptureError::Backend(format!(
                 "session directory must end with session id {session_id}: {}",
                 session_dir.display()
+            )));
+        }
+        if config.ring_frames == 0 || config.chunk_frames == 0 || config.channels == 0 {
+            return Err(CaptureError::Backend(format!(
+                "invalid capture config for session {session_id}: ring_frames={}, chunk_frames={}, channels={} must all be positive",
+                config.ring_frames, config.chunk_frames, config.channels
             )));
         }
         let ring_frames = config.ring_frames;
@@ -338,6 +376,10 @@ impl CaptureEngine {
                 )));
             }
         }
+
+        // Must precede create_dir_all and every state change: a rejected
+        // restart must leave the existing session output and engine untouched.
+        reject_existing_capture_output(&self.session_dir, &self.session_id)?;
 
         fs::create_dir_all(self.session_dir.join("audio"))?;
         self.control.state.store(RUNNING, Ordering::Release);

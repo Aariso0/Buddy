@@ -157,6 +157,15 @@ fn enumerate_nodes(kind: &TrackKind) -> Result<Vec<DeviceInfo>, CaptureError> {
     drop(registry_listener);
     drop(done_listener);
 
+    // A sync that never completes leaves the registry only partly enumerated.
+    // Returning those nodes would let `validated_target` reject a live device
+    // as unknown, so report the timeout as a typed backend error instead.
+    if !done.load(Ordering::Acquire) {
+        return Err(backend_error(
+            "PipeWire registry sync did not complete within the iteration budget",
+        ));
+    }
+
     let mut nodes = Vec::new();
     if let Ok(extra) = found.lock() {
         nodes.extend(extra.iter().cloned());

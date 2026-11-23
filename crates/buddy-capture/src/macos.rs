@@ -3,8 +3,9 @@
 //! `TrackKind::System` taps every CoreAudio process with a private
 //! `ProcessTap` and reads the tap through a private aggregate device;
 //! `TrackKind::Mic` reads the default input device. Both register an I/O proc
-//! whose callback only pushes samples into a preallocated ring, so
-//! [`AudioSource::read`] does no allocation, locking or blocking. A process tap
+//! whose callback resamples the endpoint's nominal rate to 48 kHz and pushes
+//! frames into a preallocated ring, so [`AudioSource::read`] does no allocation,
+//! locking or blocking. A process tap
 //! needs the user's System Audio Recording permission and the
 //! `NSAudioCaptureUsageDescription` Info.plist key; without the grant the tap
 //! is created but delivers silence. No virtual loopback device is used.
@@ -13,6 +14,7 @@
 //! this repository. The macOS 14.2+ floor is enforced by the OS APIs and by
 //! the pinned `coreaudio` 0.6.2 binding (see `NOTICE`).
 
+use crate::resample::LinearResampler;
 use crate::ring::RingBuffer;
 use crate::{AudioSource, CaptureError, DeviceInfo, TrackKind};
 use coreaudio::{
@@ -305,12 +307,15 @@ fn build_and_run(
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), CaptureError> {
     let (device, tap) = resolve_device(&spec)?;
-    let sample_rate = device
+    let source_rate = device
         .get_property(DEVICE_NOMINAL_SAMPLE_RATE)
         .map(|rate: f64| rate.round() as u32)
+        .ok()
+        .filter(|rate| *rate > 0)
         .unwrap_or(SAMPLE_RATE);
-    spec.sample_rate
-        .store(sample_rate.max(1), Ordering::Release);
+    // The ring is shared with the engine, so it must always hold engine-rate
+    // samples even when the endpoint runs at a different nominal rate.
+    spec.sample_rate.store(SAMPLE_RATE, Ordering::Release);
 
     // Upstream `coreaudio` 0.6.2 exposes DEVICE_IS_ALIVE as a listenable bool
     // property that becomes false on a USB/Bluetooth unplug. The listener is
@@ -318,12 +323,19 @@ fn build_and_run(
     let alive_listener = device.add_listener(DEVICE_IS_ALIVE).ok();
 
     let ring = Arc::clone(&spec.ring);
+    let mut resampler = LinearResampler::new(source_rate, SAMPLE_RATE, CHANNELS);
     let mut proc = device
         .add_io_proc(Scope::Input, move |buffers| {
             for buffer in buffers {
-                // The ring push is allocation-free and never blocks; a full ring
-                // drops this cycle's samples, which the engine records as a gap.
-                let _ = ring.push(buffer.data);
+                // `buffer.data` is the same flat interleaved stream the backend
+                // already pushed into the ring. Resample it to the engine rate
+                // one frame at a time; neither the resampler nor the emit
+                // closure allocates in the audio callback.
+                resampler.push(&buffer.data[..], |frame| {
+                    // A full ring drops this cycle's samples, which the engine
+                    // records as a gap.
+                    let _ = ring.push(frame);
+                });
             }
         })
         .map_err(map_error)?;

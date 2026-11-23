@@ -113,6 +113,10 @@ fn core_audio_source_implements_contract() {
 
 #[test]
 fn core_audio_unknown_device_is_typed_error() {
+    // Device-independent: must run even when only `default` is listed and the
+    // rest of this test would otherwise skip.
+    unknown_id_is_typed_error();
+
     let Some(_devices) = listed_devices() else {
         return;
     };
@@ -124,5 +128,4 @@ fn core_audio_unknown_device_is_typed_error() {
         );
         valid.close().expect("close must be typed and succeed");
     }
-    unknown_id_is_typed_error();
 }

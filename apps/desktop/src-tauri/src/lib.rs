@@ -552,6 +552,19 @@ fn toggle_from_ui(app: &tauri::AppHandle) {
     }
 }
 
+/// Every normal Tauri exit path (window close, tray Quit, `AppHandle::exit`,
+/// platform shutdown) ends in `RunEvent::Exit`. Finalizing here as well as in
+/// the tray handler keeps a recording from being left `Recording` when the
+/// window is closed instead. `stop_active` is a no-op on an idle app, so the
+/// tray Quit path can call it twice safely.
+fn stop_active_before_exit(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Err(error) = state.controller.stop_active() {
+            eprintln!("failed to stop recording before exit: {error}");
+        }
+    }
+}
+
 #[tauri::command]
 fn support_matrix() -> SupportFloors {
     SUPPORT_FLOORS.clone()
@@ -637,11 +650,7 @@ pub fn run() {
                     if id == TRAY_TOGGLE_ID {
                         toggle_from_ui(app);
                     } else if id == TRAY_QUIT_ID {
-                        if let Some(state) = app.try_state::<AppState>() {
-                            if let Err(error) = state.controller.stop_active() {
-                                eprintln!("failed to stop recording before quit: {error}");
-                            }
-                        }
+                        stop_active_before_exit(app);
                         app.exit(0);
                     }
                 })
@@ -675,8 +684,13 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(app_context())
-        .expect("error while running Buddy");
+        .build(app_context())
+        .expect("error while building Buddy")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                stop_active_before_exit(app);
+            }
+        });
 }
 
 #[cfg(test)]
@@ -916,11 +930,17 @@ mod tests {
         let id = app.call("start_recording", "lecture").unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
+            // The two readers are independent threads: wait for both to die
+            // before asserting the HUD, or System can finish first and leave
+            // Mic's "stopped" publication still pending.
             let dead = {
                 let slot = app.controller.lock_slot();
                 slot.active
                     .as_ref()
-                    .map(|active| !active.engine.track_is_alive(&TrackKind::System))
+                    .map(|active| {
+                        !active.engine.track_is_alive(&TrackKind::System)
+                            && !active.engine.track_is_alive(&TrackKind::Mic)
+                    })
                     .unwrap_or(false)
             };
             app.controller.refresh_liveness();
@@ -929,6 +949,9 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(10));
         }
+        // Refresh once more so the HUD reflects both dead tracks even if the
+        // watcher published after our last liveness read.
+        app.controller.refresh_liveness();
         let hud = app.hud_text();
         assert!(
             hud.contains("system: stopped") && hud.contains("mic: stopped"),

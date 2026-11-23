@@ -83,16 +83,55 @@ runner must have:
 - a real default **capture** endpoint for the Mic track.
 
 No virtual audio device is installed or required by Buddy or by its users. The
-job generates a looping 440 Hz WAV with PowerShell, plays it to the default
-render endpoint with `System.Media.SoundPlayer`, sets `BUDDY_AUDIO_SOAK=1`, and
-runs the two WASAPI integration tests (`windows_wasapi.rs`), `windows::tests::*`
-and the ignored soak test. To reproduce locally on such a machine:
+job writes a 10-second 440 Hz 48 kHz 16-bit mono WAV with PowerShell's `BinaryWriter`,
+plays it to the default render endpoint with `System.Media.SoundPlayer.PlayLooping()`
+(so the loop supplies a signal for the full hour), sets `BUDDY_AUDIO_SOAK=1`,
+and runs the two WASAPI integration tests (`windows_wasapi.rs`),
+`windows::tests::*` and the ignored soak test. The player is stopped and
+disposed in `finally` so a failed test never leaves tone playing. To reproduce
+locally on such a machine, mirror the CI script:
 
 ```powershell
-$env:BUDDY_AUDIO_SOAK = '1'
-cargo test -p buddy-capture --test windows_wasapi -- --nocapture
-cargo test -p buddy-capture --lib windows::tests -- --nocapture
-cargo test -p buddy-capture --test soak_real -- --ignored --nocapture
+$ErrorActionPreference = 'Stop'
+$tone = Join-Path $env:TEMP 'soak-tone.wav'
+$rate = 48000
+$samples = $rate * 10
+$dataBytes = $samples * 2
+$stream = [System.IO.File]::Open($tone, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+$writer = [System.IO.BinaryWriter]::new($stream)
+$writer.Write([System.Text.Encoding]::ASCII.GetBytes('RIFF'))
+$writer.Write([uint32](36 + $dataBytes))
+$writer.Write([System.Text.Encoding]::ASCII.GetBytes('WAVE'))
+$writer.Write([System.Text.Encoding]::ASCII.GetBytes('fmt '))
+$writer.Write([uint32]16)
+$writer.Write([uint16]1)
+$writer.Write([uint16]1)
+$writer.Write([uint32]$rate)
+$writer.Write([uint32]($rate * 2))
+$writer.Write([uint16]2)
+$writer.Write([uint16]16)
+$writer.Write([System.Text.Encoding]::ASCII.GetBytes('data'))
+$writer.Write([uint32]$dataBytes)
+for ($i = 0; $i -lt $samples; $i++) {
+  $writer.Write([int16][math]::Round(12000 * [math]::Sin(2 * [math]::PI * 440 * $i / $rate)))
+}
+$writer.Dispose()
+# WASAPI loopback captures the default render endpoint's mix, so a looping
+# generated tone is a 60-minute signal on that endpoint.
+$player = [System.Media.SoundPlayer]::new($tone)
+try {
+  $player.PlayLooping()
+  $env:BUDDY_AUDIO_SOAK = '1'
+  cargo test -p buddy-capture --test windows_wasapi -- --nocapture
+  if ($LASTEXITCODE -ne 0) { throw "windows_wasapi integration tests failed ($LASTEXITCODE)" }
+  cargo test -p buddy-capture --lib windows::tests -- --nocapture
+  if ($LASTEXITCODE -ne 0) { throw "windows::tests failed ($LASTEXITCODE)" }
+  cargo test -p buddy-capture --test soak_real -- --ignored --nocapture
+  if ($LASTEXITCODE -ne 0) { throw "soak_real failed ($LASTEXITCODE)" }
+} finally {
+  $player.Stop()
+  $player.Dispose()
+}
 ```
 
 ## macOS: UNVERIFIED

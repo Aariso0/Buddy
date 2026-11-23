@@ -4,7 +4,8 @@
 //!
 //! `BUDDY_AUDIO_SOAK=1` turns a missing render endpoint into a hard failure.
 //! Task 8's Windows soak must set it so a device-less runner cannot pass by
-//! skipping both contract tests.
+//! skipping both contract tests. Enumeration errors are always a failure: a
+//! broken COM setup is not evidence that no endpoint exists.
 
 #![cfg(target_os = "windows")]
 
@@ -27,18 +28,16 @@ fn skip_or_fail(reason: &str) {
     eprintln!("SKIP: {reason}; set {SOAK_ENV}=1 to make this a hard failure");
 }
 
-/// Device presence comes only from `list_devices`. A `Backend` error from
-/// `open` is never treated as absence: once a real System endpoint is listed,
-/// the caller must assert the full contract and let any `open` failure fail.
+/// Device presence comes only from a successful `list_devices`. A `Backend`
+/// error from enumeration is a broken backend, not an absent endpoint, so it
+/// always fails. A `Backend` error from `open` is likewise never treated as
+/// absence once a real System endpoint is listed.
 fn system_devices_or_skip() -> Option<Vec<DeviceInfo>> {
     let devices = match WasapiSource::list_devices(TrackKind::System) {
         Ok(devices) => devices,
-        Err(error) => {
-            skip_or_fail(&format!(
-                "WASAPI device enumeration to succeed (got {error})"
-            ));
-            return None;
-        }
+        Err(error) => panic!(
+            "WASAPI device enumeration failed; a COM/backend error is not an absent endpoint: {error}"
+        ),
     };
     // `default` is a pseudo-device that list_devices always injects, so a
     // non-default id is the evidence that a real render endpoint exists.

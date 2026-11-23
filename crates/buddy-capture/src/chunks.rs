@@ -50,13 +50,38 @@ fn track_stem(track: &TrackKind) -> &'static str {
     }
 }
 
-fn wav_header(values: usize, sample_rate: u32, channels: u16) -> [u8; HEADER_BYTES] {
-    let data_bytes = (values * 4) as u32;
-    let block_align = channels * 4;
-    let byte_rate = sample_rate * u32::from(block_align);
+fn wav_header(
+    values: usize,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<[u8; HEADER_BYTES], CaptureError> {
+    // Every f32 is four bytes, and both sizes live in u32 header fields. Check
+    // each step so an oversized chunk is rejected instead of wrapping in debug
+    // builds or silently truncating the published header.
+    let data_bytes = u32::try_from(values)
+        .ok()
+        .and_then(|values| values.checked_mul(4))
+        .ok_or_else(|| {
+            CaptureError::InvalidChunk(format!("{values} samples exceed the WAV data size limit"))
+        })?;
+    let riff_size = data_bytes.checked_add(36).ok_or_else(|| {
+        CaptureError::InvalidChunk("WAV RIFF size exceeds the u32 header field".to_owned())
+    })?;
+    let block_align = channels.checked_mul(4).ok_or_else(|| {
+        CaptureError::InvalidChunk(format!(
+            "{channels} channels exceed the WAV block align limit"
+        ))
+    })?;
+    let byte_rate = sample_rate
+        .checked_mul(u32::from(block_align))
+        .ok_or_else(|| {
+            CaptureError::InvalidChunk(format!(
+                "sample rate {sample_rate} with {channels} channels is too large"
+            ))
+        })?;
     let mut h = [0u8; HEADER_BYTES];
     h[0..4].copy_from_slice(b"RIFF");
-    h[4..8].copy_from_slice(&(36 + data_bytes).to_le_bytes());
+    h[4..8].copy_from_slice(&riff_size.to_le_bytes());
     h[8..12].copy_from_slice(b"WAVE");
     h[12..16].copy_from_slice(b"fmt ");
     h[16..20].copy_from_slice(&16u32.to_le_bytes());
@@ -68,7 +93,7 @@ fn wav_header(values: usize, sample_rate: u32, channels: u16) -> [u8; HEADER_BYT
     h[34..36].copy_from_slice(&32u16.to_le_bytes());
     h[36..40].copy_from_slice(b"data");
     h[40..44].copy_from_slice(&data_bytes.to_le_bytes());
-    h
+    Ok(h)
 }
 
 // Directory fsync is durability hardening only: opening a directory fails on
@@ -110,8 +135,15 @@ pub fn write_chunk(
     // another's in-progress chunk.
     let tmp_path = audio_dir.join(format!(".{}.{}.tmp", file_name, Uuid::new_v4()));
 
+    let header = wav_header(samples.len(), sample_rate, channels)?;
+    let frames = u32::try_from(samples.len()).map_err(|_| {
+        CaptureError::InvalidChunk(format!(
+            "chunk has {} samples: frame count exceeds u32",
+            samples.len()
+        ))
+    })?;
     let mut bytes = Vec::with_capacity(HEADER_BYTES + samples.len() * 4);
-    bytes.extend_from_slice(&wav_header(samples.len(), sample_rate, channels));
+    bytes.extend_from_slice(&header);
     for sample in samples {
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
@@ -140,7 +172,7 @@ pub fn write_chunk(
         track,
         index,
         path: final_path,
-        frames: samples.len() as u32,
+        frames,
         sample_rate,
         channels,
     })
@@ -231,6 +263,7 @@ fn parse_chunk(path: &Path, track: TrackKind, index: u32) -> Result<ChunkInfo, C
                     track,
                     index,
                     path: path.to_owned(),
+                    // `size` was read from a u32 field, so `size / 4` fits.
                     frames: (size / 4) as u32,
                     sample_rate,
                     channels,
@@ -303,4 +336,43 @@ pub fn read_gaps(session_dir: &Path) -> Result<Vec<GapMarker>, CaptureError> {
         gaps.push(marker);
     }
     Ok(gaps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wav_header_rejects_a_data_size_that_would_truncate() {
+        // One Gi f32 values would need 4 Gi of data, past the u32 header field.
+        let error = wav_header(u32::MAX as usize, 48_000, 2).unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidChunk(_)), "{error}");
+        // A usize too large even for u32 is rejected the same way.
+        let error = wav_header(usize::MAX, 48_000, 2).unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidChunk(_)), "{error}");
+    }
+
+    #[test]
+    fn wav_header_rejects_an_overwide_block_align() {
+        // 16_384 * 4 no longer fits the u16 block-align field.
+        let error = wav_header(16, 48_000, 16_384).unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidChunk(_)), "{error}");
+    }
+
+    #[test]
+    fn wav_header_rejects_an_overflowing_byte_rate() {
+        let error = wav_header(16, u32::MAX, 2).unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidChunk(_)), "{error}");
+    }
+
+    #[test]
+    fn wav_header_accepts_valid_inputs() {
+        let header = wav_header(96_000, 48_000, 2).unwrap();
+        assert_eq!(&header[0..4], b"RIFF");
+        assert_eq!(
+            u32::from_le_bytes(header[40..44].try_into().unwrap()),
+            96_000 * 4
+        );
+        assert_eq!(u16::from_le_bytes(header[32..34].try_into().unwrap()), 8);
+    }
 }

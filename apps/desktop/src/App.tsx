@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   invoke,
   listenRecordingState,
@@ -30,18 +30,21 @@ export default function App() {
   });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Incremented by every `recording-state` event. A snapshot requested before
+  // an event must not overwrite the newer view when it finally arrives.
+  const stateEventGeneration = useRef(0);
 
   useEffect(() => {
     let active = true;
     let stopListening: (() => void) | undefined;
-    let sawStateEvent = false;
+    const generationAtMount = stateEventGeneration.current;
 
     // Subscribe first: a state change between the snapshot read and listener
     // registration would otherwise be lost, and a late snapshot could overwrite
     // a newer event.
     void listenRecordingState((next) => {
       if (active) {
-        sawStateEvent = true;
+        stateEventGeneration.current += 1;
         setView(next);
       }
     })
@@ -53,7 +56,9 @@ export default function App() {
         stopListening = stop;
         void invoke<RecordingView>("recording_state")
           .then((state) => {
-            if (active && !sawStateEvent) setView(state);
+            if (active && stateEventGeneration.current === generationAtMount) {
+              setView(state);
+            }
           })
           .catch((cause: unknown) => {
             if (active) setError(String(cause));
@@ -84,9 +89,13 @@ export default function App() {
   const run = useCallback(async (command: string, args?: Record<string, unknown>) => {
     setBusy(true);
     setError(null);
+    const generation = stateEventGeneration.current;
     try {
       await invoke(command, args);
-      setView(await invoke<RecordingView>("recording_state"));
+      const state = await invoke<RecordingView>("recording_state");
+      // A hotkey or tray toggle can emit a newer state while these promises
+      // are in flight; keep that event's view instead of restoring a stale one.
+      if (stateEventGeneration.current === generation) setView(state);
     } catch (cause) {
       // Keep the last known view: a failed refresh must not make a live
       // recording look idle just because the follow-up snapshot failed.

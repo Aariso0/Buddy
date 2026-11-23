@@ -1,16 +1,30 @@
 //! Linux PipeWire backend contract. PipeWire is optional on the test host, so
 //! an absent server is a valid typed outcome rather than a failed assertion.
+//! `BUDDY_AUDIO_SOAK=1` rejects that fallback so a device-less runner cannot
+//! pass by skipping the live assertions.
 
 #![cfg(target_os = "linux")]
 
 use buddy_capture::linux::PipeWireSource;
 use buddy_capture::{AudioSource, CaptureError, TrackKind};
 
+const SOAK_ENV: &str = "BUDDY_AUDIO_SOAK";
+
+fn soak_enabled() -> bool {
+    std::env::var(SOAK_ENV)
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
 fn absent_runtime(error: &CaptureError) -> bool {
-    matches!(
+    let absence = matches!(
         error,
         CaptureError::Backend(_) | CaptureError::UnsupportedPlatform(_)
-    )
+    );
+    if absence && soak_enabled() {
+        panic!("{SOAK_ENV}=1 requires a live PipeWire runtime; backend reported absence: {error}");
+    }
+    absence
 }
 
 #[test]
