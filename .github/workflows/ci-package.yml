@@ -35,7 +35,7 @@ jobs:
     name: package (${{ inputs.os }})
     runs-on: ${{ inputs.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-workspace
         with:
           install-linux-deps: ${{ inputs.os == 'ubuntu-latest' }}
