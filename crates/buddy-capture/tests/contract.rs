@@ -112,6 +112,7 @@ struct SourceHandle {
     closes: Arc<AtomicUsize>,
     value: Arc<Mutex<f32>>,
     delay: Arc<Mutex<Duration>>,
+    burst: Arc<AtomicUsize>,
 }
 
 impl SourceHandle {
@@ -139,8 +140,10 @@ impl SourceHandle {
         *self.value.lock().unwrap() = value;
     }
 
-    fn set_delay(&self, delay: Duration) {
-        *self.delay.lock().unwrap() = delay;
+    /// Let the next `reads` calls skip `delay` so a tiny ring overruns without
+    /// producing an unbounded storm of gap markers.
+    fn set_burst(&self, reads: usize) {
+        self.burst.store(reads, Ordering::SeqCst);
     }
 }
 
@@ -169,6 +172,7 @@ impl ControlledSource {
                 0.25
             })),
             delay: Arc::new(Mutex::new(delay)),
+            burst: Arc::new(AtomicUsize::new(0)),
         };
         (
             Self {
@@ -203,7 +207,12 @@ impl AudioSource for ControlledSource {
 
     fn read(&mut self, out: &mut [f32]) -> Result<usize, CaptureError> {
         self.handle.reads.fetch_add(1, Ordering::SeqCst);
-        let delay = *self.handle.delay.lock().unwrap();
+        let delay = if self.handle.burst.load(Ordering::SeqCst) > 0 {
+            self.handle.burst.fetch_sub(1, Ordering::SeqCst);
+            Duration::ZERO
+        } else {
+            *self.handle.delay.lock().unwrap()
+        };
         if !delay.is_zero() {
             thread::sleep(delay);
         }
@@ -393,14 +402,15 @@ fn overrun_records_gap_and_new_samples_reach_disk() {
     let dir = tempfile::tempdir().unwrap();
     let session_dir = session_dir_under(dir.path());
     let config = CaptureConfig {
+        chunk_frames: 64,
         ring_frames: 8,
         ..CaptureConfig::default()
     };
-    // A short per-read delay keeps the overrun rate below the writer's gap
-    // drain rate; with no delay the 16k-slot gap queue overflows before the
-    // writer can publish the first marker.
-    let (mic, handle) =
-        ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::from_micros(250));
+    // Two back-to-back reads are enough to overrun the tiny ring. Slow reads
+    // afterwards let the writer drain; an unbounded fast source floods
+    // gaps.jsonl on slow CI filesystems and starves later samples.
+    let (mic, handle) = ControlledSource::new(TrackKind::Mic, usize::MAX, Duration::from_millis(5));
+    handle.set_burst(2);
     let mut engine = CaptureEngine::new(
         SESSION_ID,
         &session_dir,
@@ -415,24 +425,24 @@ fn overrun_records_gap_and_new_samples_reach_disk() {
     )
     .unwrap();
     engine.start().unwrap();
-    // Wait for the published marker, not for a fixed sleep: the writer flushes
-    // gaps.jsonl as it drains them, so this is observable while capture runs.
+    // The third read cannot start until the second has already overrun. Waiting
+    // on reads avoids polling gaps.jsonl, which the writer fsyncs per marker.
+    wait_for(|| handle.reads() >= 3);
+    handle.set_value(0.75);
     wait_for(|| {
-        read_gaps(&session_dir)
-            .map(|gaps| gaps.iter().any(|g| matches!(g.reason, GapReason::Overrun)))
+        read_chunk_index(&session_dir)
+            .map(|chunks| {
+                chunks
+                    .iter()
+                    .filter(|chunk| chunk.track == TrackKind::Mic)
+                    .any(|chunk| {
+                        read_chunk_samples(&session_dir, chunk)
+                            .map(|samples| samples.iter().any(|&sample| sample == 0.75))
+                            .unwrap_or(false)
+                    })
+            })
             .unwrap_or(false)
     });
-    // Switch to a distinguishable value only after the overrun is known. Slow
-    // the mic right after the overrun burst: a fast reader against this tiny
-    // 8-frame ring keeps overrunning, so post-switch samples would be dropped
-    // as gaps instead of entering the ring. The slower rate lets the writer
-    // drain between reads; the extra dwell gives it time to clear any backlog
-    // of overrun markers before stop flushes the pending chunk.
-    handle.set_delay(Duration::from_millis(5));
-    handle.set_value(0.75);
-    let reads_at_switch = handle.reads();
-    wait_for(|| handle.reads() >= reads_at_switch + 8);
-    thread::sleep(Duration::from_millis(200));
     engine.stop().unwrap();
 
     assert!(read_gaps(&session_dir)
