@@ -111,6 +111,7 @@ struct SourceHandle {
     pauses: Arc<AtomicUsize>,
     closes: Arc<AtomicUsize>,
     value: Arc<Mutex<f32>>,
+    delay: Arc<Mutex<Duration>>,
 }
 
 impl SourceHandle {
@@ -137,6 +138,10 @@ impl SourceHandle {
     fn set_value(&self, value: f32) {
         *self.value.lock().unwrap() = value;
     }
+
+    fn set_delay(&self, delay: Duration) {
+        *self.delay.lock().unwrap() = delay;
+    }
 }
 
 /// Test source with controllable error injection, a configurable per-read
@@ -147,7 +152,6 @@ struct ControlledSource {
     kind: TrackKind,
     frames_total: usize,
     position: usize,
-    delay: Duration,
     handle: SourceHandle,
 }
 
@@ -164,13 +168,13 @@ impl ControlledSource {
             } else {
                 0.25
             })),
+            delay: Arc::new(Mutex::new(delay)),
         };
         (
             Self {
                 kind,
                 frames_total,
                 position: 0,
-                delay,
                 handle: handle.clone(),
             },
             handle,
@@ -199,8 +203,9 @@ impl AudioSource for ControlledSource {
 
     fn read(&mut self, out: &mut [f32]) -> Result<usize, CaptureError> {
         self.handle.reads.fetch_add(1, Ordering::SeqCst);
-        if !self.delay.is_zero() {
-            thread::sleep(self.delay);
+        let delay = *self.handle.delay.lock().unwrap();
+        if !delay.is_zero() {
+            thread::sleep(delay);
         }
         if let Some(error) = self.handle.injection.lock().unwrap().take() {
             return Err(error);
@@ -417,11 +422,17 @@ fn overrun_records_gap_and_new_samples_reach_disk() {
             .map(|gaps| gaps.iter().any(|g| matches!(g.reason, GapReason::Overrun)))
             .unwrap_or(false)
     });
-    // Switch to a distinguishable value only after the overrun is known, then
-    // let the reader push several more batches before stopping.
+    // Switch to a distinguishable value only after the overrun is known. Slow
+    // the mic right after the overrun burst: a fast reader against this tiny
+    // 8-frame ring keeps overrunning, so post-switch samples would be dropped
+    // as gaps instead of entering the ring. The slower rate lets the writer
+    // drain between reads; the extra dwell gives it time to clear any backlog
+    // of overrun markers before stop flushes the pending chunk.
+    handle.set_delay(Duration::from_millis(5));
     handle.set_value(0.75);
     let reads_at_switch = handle.reads();
     wait_for(|| handle.reads() >= reads_at_switch + 8);
+    thread::sleep(Duration::from_millis(200));
     engine.stop().unwrap();
 
     assert!(read_gaps(&session_dir)
